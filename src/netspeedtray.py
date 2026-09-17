@@ -85,7 +85,7 @@ ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
 UI_VERSION = 7
 
-WINDOW_WIDTH = 178
+WINDOW_WIDTH = 0
 CARD_BORDER = 1
 CORNER_RADIUS = 6
 CONTENT_PAD_X = 6
@@ -1281,11 +1281,6 @@ class SpeedWidget:
         self.canvas.config(width=self.window_width, height=height)
         if x is None or y is None:
             x, y = self.root.winfo_x(), self.root.winfo_y()
-        area = monitor_work_area(x + self.window_width // 2, y + self._card_h // 2)
-        if area:
-            left, top, right, bottom = area
-            x = max(left, min(x, right - self.window_width))
-            y = max(top, min(y, bottom - height))
         self.root.geometry(f"{self.window_width}x{height}+{int(x)}+{int(y)}")
         if self.bg_window is not None and self.bg_canvas is not None:
             self.bg_canvas.config(width=self.window_width, height=height)

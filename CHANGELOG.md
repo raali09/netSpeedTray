@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - UI version bumped to 7.
 
 ### Fixed
+- **Empty space when CPU/RAM disabled** — the card width was still forced to a 178px minimum
+  even after disabling CPU/RAM, leaving a large blank area on the right. The minimum-width
+  floor has been removed so the card now shrinks to exactly its content width (~74px without
+  badges, ~135px with badges).
+- **Card drifting when not locked** — every 1-second refresh was re-clamping the card position
+  to the work area, which pushed the card left whenever the speed value width changed even
+  slightly (e.g. "0 KB/s" → "2 KB/s"). Position clamping has been removed from the geometry
+  update path; the card now stays exactly where the user placed it. Clamping only happens on
+  initial placement and position reset.
 - **Text visibility at low transparency** — previously, reducing the background opacity also
   made the speed text hard to read on bright desktops. Now only the card background fades;
   the text is drawn on a separate always-opaque foreground window with a dark outline, so it
