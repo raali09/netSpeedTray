@@ -21,10 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exe, so a freshly-cloned repo produces a correctly-iconised binary.
 
 ### Changed
-- **Tighter live window** — reduced value-field sample width (`999.99 MB/s` instead of
-  `9,999.99 MB/s`), smaller content padding (6px / 3px), smaller icon gap (4px), smaller
-  separator padding (5px), and a slightly smaller corner radius (6px). The card now takes
-  up noticeably less screen space, especially in the download/upload column.
+- **Dynamic value-column width** — the speed field no longer reserves space for the widest
+  possible reading. It now tracks the actual width of the current download/upload values
+  (capped at `999.99 MB/s`), so the card is always as narrow as the current speeds require.
+  The card grows/shrinks a few pixels when the speed crosses a digit threshold (e.g. 9 → 10 KB/s).
+- **Dynamic card width when CPU/RAM is hidden** — when "Show CPU / RAM" is turned off, the
+  badge column (separator + CPU/RAM badges) is now removed entirely instead of left empty.
+  The card shrinks to just the download/upload column, taking up significantly less screen space.
+- **Tighter live window** — reduced content padding (6px / 3px), smaller icon gap (4px),
+  smaller separator padding (5px), and a slightly smaller corner radius (6px).
 - Speed readings, icons, and badges are now canvas text items (with shadow) instead of
   `tk.Label` widgets — this removes the intermediate Frame / grid layer and lets the text
   float directly on the transparent foreground window.

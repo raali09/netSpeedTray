@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.error
 import urllib.request
 import webbrowser
@@ -985,6 +986,17 @@ class SpeedWidget:
         self._text_items: Dict[str, List[int]] = {}
         self._sep_line: Optional[int] = None
         self._icon_photos: List[tk.PhotoImage] = []
+        self._font_cache: Dict[Tuple, tkfont.Font] = {}
+        self._current_texts: Dict[str, str] = {
+            "down_icon": "\u2193", "up_icon": "\u2191",
+            "down_value": "0 KB/s", "up_value": "0 KB/s",
+            "cpu_badge": "CPU --", "ram_badge": "RAM --",
+        }
+        self._current_colors: Dict[str, str] = {
+            "down_icon": FG_DOWN, "up_icon": FG_UP,
+            "down_value": FG_DOWN, "up_value": FG_UP,
+            "cpu_badge": FG_CPU, "ram_badge": FG_RAM,
+        }
 
         self.root = tk.Tk()
         self.bg_window: Optional[tk.Toplevel] = None
@@ -1103,19 +1115,96 @@ class SpeedWidget:
         self.radius = int(round(CORNER_RADIUS * self.ui_scale))
         self.border = max(1, int(round(CARD_BORDER * self.ui_scale)))
         self.icon_px = self._text_size("\u2193", FONT_ICON)[0] + 2
-        self.value_px = self._text_size(VALUE_SAMPLE, FONT_VALUE)[0]
+        self._value_px_max = self._text_size(VALUE_SAMPLE, FONT_VALUE)[0]
         self.badge_px = self._text_size(BADGE_SAMPLE, FONT_SYSTEM)[0]
         self.row_h = max(self._text_size("0 KB/s", FONT_VALUE)[1],
                          self._text_size("\u2193", FONT_ICON)[1],
                          self._text_size("CPU --", FONT_SYSTEM)[1])
-        content = (self.icon_px + ICON_GAP + self.value_px + 2 * SEP_PAD + 1 + self.badge_px)
+        self.value_px = self._measure_text_width("0 KB/s", FONT_VALUE)
+        self._recompute_width()
+
+    def _include_sysload(self) -> bool:
+        if hasattr(self, "sysload_var"):
+            return bool(self.sysload_var.get())
+        return bool(self.config.get("show_sysload", True))
+
+    def _recompute_width(self) -> None:
+        content = self.icon_px + ICON_GAP + self.value_px
+        if self._include_sysload():
+            content += 2 * SEP_PAD + 1 + self.badge_px
         self.window_width = int(max(WINDOW_WIDTH, content + 2 * (self.border + CONTENT_PAD_X) + 2))
+
+    def _measure_text_width(self, text: str, font: Tuple[str, int, str]) -> int:
+        if font not in self._font_cache:
+            self._font_cache[font] = tkfont.Font(font=font)
+        return self._font_cache[font].measure(text)
+
+    def _update_value_width(self, down_text: str, up_text: str) -> None:
+        needed = max(self._measure_text_width(down_text, FONT_VALUE),
+                    self._measure_text_width(up_text, FONT_VALUE))
+        needed = min(needed, self._value_px_max)
+        needed = max(needed, self._measure_text_width("0 KB/s", FONT_VALUE))
+        needed = ((needed + 1) // 2) * 2
+        if needed == self.value_px:
+            return
+        self.value_px = needed
+        self._relayout()
+
+    def _relayout(self) -> None:
+        self._recompute_width()
+        self._rebuild_text_items()
+        self._apply_geometry()
+
+    def _rebuild_text_items(self) -> None:
+        if self.canvas is None:
+            return
+        for items in self._text_items.values():
+            for item in items:
+                self.canvas.delete(item)
+        self._text_items = {}
+        if self.bg_canvas is not None and self._sep_line is not None:
+            self.bg_canvas.delete(self._sep_line)
+            self._sep_line = None
+
+        left = self.border + CONTENT_PAD_X
+        icon_x = left
+        value_right_x = left + self.icon_px + ICON_GAP + self.value_px
+        badge_right_x = self.window_width - self.border - CONTENT_PAD_X
+
+        self._make_text("down_icon", icon_x, self._row_y(0),
+                        self._current_texts["down_icon"], FONT_ICON,
+                        self._current_colors["down_icon"], "w")
+        self._make_text("down_value", value_right_x, self._row_y(0),
+                        self._current_texts["down_value"], FONT_VALUE,
+                        self._current_colors["down_value"], "e")
+        self._make_text("up_icon", icon_x, self._row_y(1),
+                        self._current_texts["up_icon"], FONT_ICON,
+                        self._current_colors["up_icon"], "w")
+        self._make_text("up_value", value_right_x, self._row_y(1),
+                        self._current_texts["up_value"], FONT_VALUE,
+                        self._current_colors["up_value"], "e")
+
+        if self._include_sysload():
+            self._make_text("cpu_badge", badge_right_x, self._row_y(0),
+                            self._current_texts["cpu_badge"], FONT_SYSTEM,
+                            self._current_colors["cpu_badge"], "e")
+            self._make_text("ram_badge", badge_right_x, self._row_y(1),
+                            self._current_texts["ram_badge"], FONT_SYSTEM,
+                            self._current_colors["ram_badge"], "e")
+            if self.bg_canvas is not None:
+                sep_x = value_right_x + SEP_PAD
+                sep_top = self.border + CONTENT_PAD_Y + 2
+                sep_bot = self.border + CONTENT_PAD_Y + 2 * self.row_h - 2
+                self._sep_line = self.bg_canvas.create_line(
+                    sep_x, sep_top, sep_x, sep_bot, fill=BORDER_SOFT, width=1)
 
     def _row_y(self, row: int) -> float:
         return self.border + CONTENT_PAD_Y + row * self.row_h + self.row_h / 2.0
 
     def _make_text(self, key: str, x: float, y: float, text: str,
                    font: Tuple[str, int, str], fill: str, anchor: str) -> None:
+        self._current_texts[key] = text
+        self._current_colors[key] = fill
         items: List[int] = []
         for dx, dy in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)):
             items.append(self.canvas.create_text(x + dx, y + dy, text=text,
@@ -1124,6 +1213,9 @@ class SpeedWidget:
         self._text_items[key] = items
 
     def _set_text(self, key: str, text: str, fill: Optional[str] = None) -> None:
+        self._current_texts[key] = text
+        if fill is not None:
+            self._current_colors[key] = fill
         items = self._text_items.get(key)
         if not items:
             return
@@ -1144,27 +1236,9 @@ class SpeedWidget:
                                 bd=0, width=self.window_width, height=self._card_h)
         self.canvas.pack(fill="both", expand=True)
 
-        self._text_items: Dict[str, List[int]] = {}
-        self._sep_line: Optional[int] = None
-
-        left = self.border + CONTENT_PAD_X
-        icon_x = left
-        value_right_x = left + self.icon_px + ICON_GAP + self.value_px
-        sep_x = value_right_x + SEP_PAD
-        badge_right_x = self.window_width - self.border - CONTENT_PAD_X
-
-        self._make_text("down_icon", icon_x, self._row_y(0), "\u2193", FONT_ICON, FG_DOWN, "w")
-        self._make_text("down_value", value_right_x, self._row_y(0), "0 KB/s", FONT_VALUE, FG_DOWN, "e")
-        self._make_text("up_icon", icon_x, self._row_y(1), "\u2191", FONT_ICON, FG_UP, "w")
-        self._make_text("up_value", value_right_x, self._row_y(1), "0 KB/s", FONT_VALUE, FG_UP, "e")
-        self._make_text("cpu_badge", badge_right_x, self._row_y(0), "CPU --", FONT_SYSTEM, FG_CPU, "e")
-        self._make_text("ram_badge", badge_right_x, self._row_y(1), "RAM --", FONT_SYSTEM, FG_RAM, "e")
-
-        if self.bg_canvas is not None:
-            sep_top = self.border + CONTENT_PAD_Y + 2
-            sep_bot = self.border + CONTENT_PAD_Y + 2 * self.row_h - 2
-            self._sep_line = self.bg_canvas.create_line(
-                sep_x, sep_top, sep_x, sep_bot, fill=BORDER_SOFT, width=1)
+        self._text_items = {}
+        self._sep_line = None
+        self._rebuild_text_items()
 
     def _rounded_rect(self, canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
                       radius: float, fill: str) -> List[int]:
@@ -1207,6 +1281,11 @@ class SpeedWidget:
         self.canvas.config(width=self.window_width, height=height)
         if x is None or y is None:
             x, y = self.root.winfo_x(), self.root.winfo_y()
+        area = monitor_work_area(x + self.window_width // 2, y + self._card_h // 2)
+        if area:
+            left, top, right, bottom = area
+            x = max(left, min(x, right - self.window_width))
+            y = max(top, min(y, bottom - height))
         self.root.geometry(f"{self.window_width}x{height}+{int(x)}+{int(y)}")
         if self.bg_window is not None and self.bg_canvas is not None:
             self.bg_canvas.config(width=self.window_width, height=height)
@@ -1227,16 +1306,9 @@ class SpeedWidget:
         return collect(self.root)
 
     def _refresh_layout(self) -> None:
-        if self.sysload_var.get():
-            if self._sep_line is not None and self.bg_canvas is not None:
-                self.bg_canvas.itemconfig(self._sep_line, state="normal")
+        self._relayout()
+        if self._include_sysload():
             self._update_system_labels()
-        else:
-            if self._sep_line is not None and self.bg_canvas is not None:
-                self.bg_canvas.itemconfig(self._sep_line, state="hidden")
-            self._set_text("cpu_badge", "")
-            self._set_text("ram_badge", "")
-        self._apply_geometry()
         if self.locked:
             self._enforce_locked_position()
 
@@ -1671,10 +1743,13 @@ class SpeedWidget:
 
     def _refresh_labels(self, down: float, up: float) -> None:
         alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024 * 1024
-        self._set_text("down_value", format_speed(down),
+        down_text = format_speed(down)
+        up_text = format_speed(up)
+        self._set_text("down_value", down_text,
                        FG_ALERT if alert_bps and down >= alert_bps else FG_DOWN)
-        self._set_text("up_value", format_speed(up),
+        self._set_text("up_value", up_text,
                        FG_ALERT if alert_bps and up >= alert_bps else FG_UP)
+        self._update_value_width(down_text, up_text)
 
     def quit(self) -> None:
         if self._closing: return
