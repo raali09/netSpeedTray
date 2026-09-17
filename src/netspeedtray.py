@@ -31,7 +31,7 @@ except ImportError:
     winreg = None
 
 APP_NAME = "NetSpeedTray"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 DEVELOPER_LINE = "Design and Developer: Ali Rahmani  (github.com/raali09)"
 CONTACT_EMAIL = "rahmaniali09@gmail.com"
 GITHUB_REPO = "raali09/NetSpeedTray"
@@ -65,6 +65,7 @@ FG_CHECK = "#38BDF8"
 
 BG_TRANSPARENT_KEY = "#0A0B0C"
 FG_TRANSPARENT_KEY = "#0D0E0F"
+SHADOW_COLOR = "#000000"
 
 FONT_FAMILY = "Segoe UI Variable Text"
 FONT_ICON = (FONT_FAMILY, 10, "bold")
@@ -81,16 +82,16 @@ IDLE_BPS = 1024
 IDLE_TICKS = 5
 ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
-UI_VERSION = 6
+UI_VERSION = 7
 
-WINDOW_WIDTH = 196
+WINDOW_WIDTH = 178
 CARD_BORDER = 1
-CORNER_RADIUS = 7
-CONTENT_PAD_X = 7
-CONTENT_PAD_Y = 4
-ICON_GAP = 5
-SEP_PAD = 6
-VALUE_SAMPLE = "9,999.99 MB/s"
+CORNER_RADIUS = 6
+CONTENT_PAD_X = 6
+CONTENT_PAD_Y = 3
+ICON_GAP = 4
+SEP_PAD = 5
+VALUE_SAMPLE = "999.99 MB/s"
 BADGE_SAMPLE = "CPU 100%"
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
@@ -594,7 +595,8 @@ def install_update(temp_exe: str) -> bool:
             fh.write("@echo off\r\n")
             fh.write("timeout /t 2 /nobreak >nul\r\n")
             fh.write(f'del /f /q "{current_exe}" >nul 2>&1\r\n')
-            fh.write(f'move /y "{temp_exe}" "{current_exe}" >nul 2>&1\r\n')
+            fh.write(f'copy /y "{temp_exe}" "{current_exe}" >nul 2>&1\r\n')
+            fh.write(f'del /f /q "{temp_exe}" >nul 2>&1\r\n')
             fh.write(f'start "" "{current_exe}"\r\n')
             fh.write('del /f /q "%~f0" >nul 2>&1\r\n')
     except OSError:
@@ -729,9 +731,9 @@ class OpacityPopup:
                   command=self._cancel).pack(side="right")
 
         for w in (self.window, inner, head_row):
-            w.bind("<FocusOut>", lambda _e: self._maybe_close_on_focus_loss())
+            w.bind("<Button-3>", lambda _e: self.close())
         self.window.bind("<Escape>", lambda _e: self.close())
-        self.window.bind("<Button-3>", lambda _e: self.close())
+        self.window.bind("<FocusOut>", lambda _e: self._maybe_close_on_focus_loss())
         self.window.after(60, lambda: self.window.focus_force())
 
     def _place(self) -> None:
@@ -765,14 +767,9 @@ class OpacityPopup:
             self.fill_bar.config(width=max(1, int(180 * value)))
 
     def _maybe_close_on_focus_loss(self) -> None:
-        if self.window is None:
+        if self.window is None or self.scale is None:
             return
-        try:
-            focused = self.window.focus_get()
-        except tk.TclError:
-            focused = None
-        if focused is None:
-            self.window.after(150, self._delayed_close_check)
+        self.window.after(200, self._delayed_close_check)
 
     def _delayed_close_check(self) -> None:
         if self.window is None or not self.window.winfo_exists():
@@ -985,6 +982,9 @@ class SpeedWidget:
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
         self._suppress_bg_sync = False
+        self._text_items: Dict[str, List[int]] = {}
+        self._sep_line: Optional[int] = None
+        self._icon_photos: List[tk.PhotoImage] = []
 
         self.root = tk.Tk()
         self.bg_window: Optional[tk.Toplevel] = None
@@ -1016,6 +1016,7 @@ class SpeedWidget:
             pass
         self.root.update_idletasks()
         self._apply_toolwindow_style(self.root)
+        self._set_window_icon(self.root)
 
         self.bg_window = tk.Toplevel(self.root)
         self.bg_window.overrideredirect(True)
@@ -1029,10 +1030,44 @@ class SpeedWidget:
             pass
         self.bg_window.update_idletasks()
         self._apply_toolwindow_style(self.bg_window)
+        self._set_window_icon(self.bg_window)
         try:
             self.root.lift(self.bg_window)
         except tk.TclError:
             pass
+
+    def _set_window_icon(self, window: tk.Misc) -> None:
+        icon = self._icon_path()
+        if icon is None:
+            return
+        try:
+            photo = tk.PhotoImage(file=icon)
+            window.iconphoto(False, photo)
+            if not hasattr(self, "_icon_photos"):
+                self._icon_photos: List[tk.PhotoImage] = []
+            self._icon_photos.append(photo)
+        except (tk.TclError, OSError):
+            pass
+
+    def _icon_path(self) -> Optional[str]:
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                p = os.path.join(meipass, "icon.png")
+                if os.path.exists(p):
+                    return p
+            p = os.path.join(os.path.dirname(sys.executable), "icon.png")
+            if os.path.exists(p):
+                return p
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            for rel in (os.path.join("..", "assets", "icon.png"),
+                        os.path.join("assets", "icon.png"),
+                        "icon.png"):
+                p = os.path.normpath(os.path.join(script_dir, rel))
+                if os.path.exists(p):
+                    return p
+        return None
 
     def _hwnd(self, window: tk.Misc) -> int:
         u = user32()
@@ -1076,22 +1111,29 @@ class SpeedWidget:
         content = (self.icon_px + ICON_GAP + self.value_px + 2 * SEP_PAD + 1 + self.badge_px)
         self.window_width = int(max(WINDOW_WIDTH, content + 2 * (self.border + CONTENT_PAD_X) + 2))
 
-    def _value_field(self, grid: tk.Frame, fg: str, row: int, pady: Tuple[int, int]) -> tk.Label:
-        box = tk.Frame(grid, bg=FG_TRANSPARENT_KEY, width=self.value_px, height=self.row_h)
-        box.pack_propagate(False)
-        box.grid(row=row, column=1, sticky="e", padx=(ICON_GAP, 0), pady=pady)
-        label = tk.Label(box, text="0 KB/s", bg=FG_TRANSPARENT_KEY, fg=fg, font=FONT_VALUE, anchor="e")
-        label.pack(fill="both", expand=True)
-        return label
+    def _row_y(self, row: int) -> float:
+        return self.border + CONTENT_PAD_Y + row * self.row_h + self.row_h / 2.0
 
-    def _badge_field(self, grid: tk.Frame, fg: str, text: str, row: int,
-                     pady: Tuple[int, int]) -> tk.Label:
-        box = tk.Frame(grid, bg=FG_TRANSPARENT_KEY, width=self.badge_px, height=self.row_h)
-        box.pack_propagate(False)
-        box.grid(row=row, column=3, sticky="e", pady=pady)
-        label = tk.Label(box, text=text, bg=FG_TRANSPARENT_KEY, fg=fg, font=FONT_SYSTEM, anchor="e")
-        label.pack(fill="both", expand=True)
-        return label
+    def _make_text(self, key: str, x: float, y: float, text: str,
+                   font: Tuple[str, int, str], fill: str, anchor: str) -> None:
+        items: List[int] = []
+        for dx, dy in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)):
+            items.append(self.canvas.create_text(x + dx, y + dy, text=text,
+                                                 font=font, fill=SHADOW_COLOR, anchor=anchor))
+        items.append(self.canvas.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor))
+        self._text_items[key] = items
+
+    def _set_text(self, key: str, text: str, fill: Optional[str] = None) -> None:
+        items = self._text_items.get(key)
+        if not items:
+            return
+        main = items[-1]
+        for item in items[:-1]:
+            self.canvas.itemconfig(item, text=text)
+        if fill is not None:
+            self.canvas.itemconfig(main, text=text, fill=fill)
+        else:
+            self.canvas.itemconfig(main, text=text)
 
     def _build_labels(self) -> None:
         self.bg_canvas = tk.Canvas(self.bg_window, bg=BG_TRANSPARENT_KEY, highlightthickness=0,
@@ -1102,30 +1144,27 @@ class SpeedWidget:
                                 bd=0, width=self.window_width, height=self._card_h)
         self.canvas.pack(fill="both", expand=True)
 
-        self.card = tk.Frame(self.canvas, bg=FG_TRANSPARENT_KEY)
-        self._card_item = self.canvas.create_window(
-            self.border + CONTENT_PAD_X, self.border + CONTENT_PAD_Y,
-            window=self.card, anchor="nw")
+        self._text_items: Dict[str, List[int]] = {}
+        self._sep_line: Optional[int] = None
 
-        grid = tk.Frame(self.card, bg=FG_TRANSPARENT_KEY)
-        grid.pack()
+        left = self.border + CONTENT_PAD_X
+        icon_x = left
+        value_right_x = left + self.icon_px + ICON_GAP + self.value_px
+        sep_x = value_right_x + SEP_PAD
+        badge_right_x = self.window_width - self.border - CONTENT_PAD_X
 
-        self.down_icon = tk.Label(grid, text="\u2193", bg=FG_TRANSPARENT_KEY, fg=FG_DOWN,
-                                   font=FONT_ICON, anchor="w")
-        self.down_icon.grid(row=0, column=0, sticky="w")
-        self.down_label = self._value_field(grid, FG_DOWN, 0, (0, 0))
+        self._make_text("down_icon", icon_x, self._row_y(0), "\u2193", FONT_ICON, FG_DOWN, "w")
+        self._make_text("down_value", value_right_x, self._row_y(0), "0 KB/s", FONT_VALUE, FG_DOWN, "e")
+        self._make_text("up_icon", icon_x, self._row_y(1), "\u2191", FONT_ICON, FG_UP, "w")
+        self._make_text("up_value", value_right_x, self._row_y(1), "0 KB/s", FONT_VALUE, FG_UP, "e")
+        self._make_text("cpu_badge", badge_right_x, self._row_y(0), "CPU --", FONT_SYSTEM, FG_CPU, "e")
+        self._make_text("ram_badge", badge_right_x, self._row_y(1), "RAM --", FONT_SYSTEM, FG_RAM, "e")
 
-        self.up_icon = tk.Label(grid, text="\u2191", bg=FG_TRANSPARENT_KEY, fg=FG_UP,
-                                 font=FONT_ICON, anchor="w")
-        self.up_icon.grid(row=1, column=0, sticky="w")
-        self.up_label = self._value_field(grid, FG_UP, 1, (0, 0))
-
-        self.sys_sep = tk.Frame(grid, bg=BORDER_SOFT, width=1)
-        self.sys_sep.grid(row=0, column=2, rowspan=2, sticky="ns",
-                          padx=(SEP_PAD, SEP_PAD))
-
-        self.cpu_badge = self._badge_field(grid, FG_CPU, "CPU --", 0, (0, 0))
-        self.ram_badge = self._badge_field(grid, FG_RAM, "RAM --", 1, (0, 0))
+        if self.bg_canvas is not None:
+            sep_top = self.border + CONTENT_PAD_Y + 2
+            sep_bot = self.border + CONTENT_PAD_Y + 2 * self.row_h - 2
+            self._sep_line = self.bg_canvas.create_line(
+                sep_x, sep_top, sep_x, sep_bot, fill=BORDER_SOFT, width=1)
 
     def _rounded_rect(self, canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
                       radius: float, fill: str) -> List[int]:
@@ -1162,10 +1201,7 @@ class SpeedWidget:
         return FG_LOCK_ACTIVE if self.locked else BORDER_COLOR
 
     def _apply_geometry(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
-        inner_w = self.window_width - 2 * (self.border + CONTENT_PAD_X)
-        self.canvas.itemconfigure(self._card_item, width=inner_w)
-        self.card.update_idletasks()
-        height = max(self.card.winfo_reqheight() + 2 * (self.border + CONTENT_PAD_Y),
+        height = max(2 * self.row_h + 2 * (self.border + CONTENT_PAD_Y),
                      2 * self.radius + 4)
         self._card_w, self._card_h = self.window_width, height
         self.canvas.config(width=self.window_width, height=height)
@@ -1192,12 +1228,14 @@ class SpeedWidget:
 
     def _refresh_layout(self) -> None:
         if self.sysload_var.get():
-            self.sys_sep.grid()
+            if self._sep_line is not None and self.bg_canvas is not None:
+                self.bg_canvas.itemconfig(self._sep_line, state="normal")
             self._update_system_labels()
         else:
-            self.sys_sep.grid_remove()
-            self.cpu_badge.config(text="")
-            self.ram_badge.config(text="")
+            if self._sep_line is not None and self.bg_canvas is not None:
+                self.bg_canvas.itemconfig(self._sep_line, state="hidden")
+            self._set_text("cpu_badge", "")
+            self._set_text("ram_badge", "")
         self._apply_geometry()
         if self.locked:
             self._enforce_locked_position()
@@ -1209,8 +1247,8 @@ class SpeedWidget:
     def _update_system_labels(self) -> None:
         self.sysload.sample()
         cpu_text, ram_text = self.sysload.text_short()
-        self.cpu_badge.config(text=cpu_text)
-        self.ram_badge.config(text=ram_text)
+        self._set_text("cpu_badge", cpu_text)
+        self._set_text("ram_badge", ram_text)
 
     def _build_menu(self) -> None:
         menu_opts = dict(tearoff=0, bg=BG_CARD, fg=FG_TEXT,
@@ -1633,10 +1671,10 @@ class SpeedWidget:
 
     def _refresh_labels(self, down: float, up: float) -> None:
         alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024 * 1024
-        self.down_label.config(text=format_speed(down),
-                               fg=FG_ALERT if alert_bps and down >= alert_bps else FG_DOWN)
-        self.up_label.config(text=format_speed(up),
-                             fg=FG_ALERT if alert_bps and up >= alert_bps else FG_UP)
+        self._set_text("down_value", format_speed(down),
+                       FG_ALERT if alert_bps and down >= alert_bps else FG_DOWN)
+        self._set_text("up_value", format_speed(up),
+                       FG_ALERT if alert_bps and up >= alert_bps else FG_UP)
 
     def quit(self) -> None:
         if self._closing: return

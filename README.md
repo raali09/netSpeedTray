@@ -8,7 +8,8 @@ that sits in the corner of your screen.
 
 No installer, no background service: it is a single Python file that samples `psutil`
 once per second. The transparency slider fades the **card background only** — the speed
-readings always stay crisp and fully readable.
+readings always stay crisp and fully readable, even at maximum transparency, thanks to a
+dark text outline drawn behind every reading.
 
 ## Download
 
@@ -26,8 +27,12 @@ Prefer to run from source? See below.
   on the current speed. There is no unit selector to configure.
 - **Background-only transparency** — a draggable slider (right-click ▸ **Background
   transparency…**) fades the card background from 20% to 100% while the speed text always
-  stays 100% opaque and crisp. Auto-hide fade also respects this separation.
+  stays 100% opaque and crisp. A dark outline is drawn behind every reading so it stays
+  readable on **any** desktop background, light or dark.
 - **CPU / RAM badges** next to the speed readings, toggleable from the right-click menu.
+- **Custom app icon** — a green rounded square with an upward arrow (and a dot on top,
+  evoking a human figure) between `<>` brackets, representing network traffic flowing
+  upward. Run `python make_icon.py` to regenerate it.
 - **Hover tooltip** with session and daily traffic totals, uptime and the processes
   holding the most network connections.
 - **Network adapter picker** — all adapters combined (total) or one interface.
@@ -42,6 +47,7 @@ Prefer to run from source? See below.
 - Windows 10 or Windows 11
 - Python 3.9 or newer (developed against 3.14)
 - [psutil](https://pypi.org/project/psutil/) — the only runtime dependency
+- [Pillow](https://pypi.org/project/Pillow/) — only needed to regenerate the app icon
 
 ## Install and run
 
@@ -72,7 +78,8 @@ pythonw src/netspeedtray.py
 Right-click the card and choose **Background transparency…** — a small popup opens with a
 horizontal slider. Drag it left for a more transparent card background, or right for a more
 solid one. The change is applied live, remembered between runs, and **only the background
-fades** — the speed text and badges stay fully opaque at every setting.
+fades** — the speed text and badges stay fully opaque at every setting, reinforced by a dark
+outline so they are always legible.
 
 ### Command line flags
 
@@ -100,6 +107,22 @@ The app checks the latest GitHub release on startup (silently) and from the righ
 Update checks can be turned off by setting `check_updates_on_start` to `false` in
 `%APPDATA%\NetSpeedTray\config.json`.
 
+## App icon
+
+The icon is a green rounded square containing an upward arrow with a dot on top (a stylized
+human figure) between `<>` brackets — symbolising network traffic flowing upward through a
+code-like container.
+
+To regenerate or tweak the icon:
+
+```bash
+py -m pip install pillow
+py make_icon.py          # writes assets/icon.png and assets/icon.ico
+```
+
+The `.ico` is embedded into the `.exe` by PyInstaller (`--icon=assets/icon.ico`). The `.png`
+is bundled inside the exe (`--add-data`) so the taskbar / window icon loads at runtime.
+
 ## Build a standalone .exe
 
 > Building overwrites `dist\NetSpeedTray.exe`. The binary is **not** committed to the
@@ -109,12 +132,18 @@ Update checks can be turned off by setting `check_updates_on_start` to `false` i
 build_exe.bat
 ```
 
-That installs PyInstaller and produces `dist\NetSpeedTray.exe` — a single file you can
-copy anywhere. The same thing by hand:
+That installs PyInstaller + Pillow, regenerates the icon if missing, and produces
+`dist\NetSpeedTray.exe` — a single file with the custom icon embedded. The same thing
+by hand:
 
 ```bash
-py -m pip install pyinstaller
-py -m PyInstaller --noconfirm --clean --onefile --windowed --name NetSpeedTray src/netspeedtray.py
+py -m pip install pyinstaller pillow
+py make_icon.py
+py -m PyInstaller --noconfirm --clean --onefile --windowed ^
+    --name NetSpeedTray ^
+    --icon=assets/icon.ico ^
+    --add-data="assets/icon.png;." ^
+    src/netspeedtray.py
 ```
 
 A ready-made GitHub Actions workflow (`.github/workflows/release.yml`) builds the exe on
@@ -141,6 +170,10 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 NetSpeedTray/
 ├── src/
 │   └── netspeedtray.py     # the whole application
+├── assets/
+│   ├── icon.png            # window / taskbar icon
+│   └── icon.ico            # embedded .exe icon (multi-resolution)
+├── make_icon.py            # regenerates assets/icon.{png,ico}
 ├── requirements.txt        # runtime dependency (psutil)
 ├── README.md
 ├── LICENSE                 # MIT
@@ -161,7 +194,9 @@ The repository stays source-only; the executable is attached to the GitHub relea
 
 ```bash
 build_exe.bat
-git tag -a v1.0.0 -m "NetSpeedTray 1.0.0"
+git add -A
+git commit -m "NetSpeedTray 1.1.0"
+git tag -a v1.1.0 -m "NetSpeedTray 1.1.0"
 git push origin main --tags
 ```
 
@@ -171,7 +206,7 @@ to review and publish. With the [GitHub CLI](https://cli.github.com/) you can al
 it locally:
 
 ```bash
-gh release create v1.0.0 dist/NetSpeedTray.exe --title "NetSpeedTray 1.0.0" --notes-file CHANGELOG.md
+gh release create v1.1.0 dist/NetSpeedTray.exe --title "NetSpeedTray 1.1.0" --notes-file CHANGELOG.md
 ```
 
 ## License
