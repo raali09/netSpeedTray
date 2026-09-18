@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -32,7 +34,7 @@ except ImportError:
     winreg = None
 
 APP_NAME = "NetSpeedTray"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 DEVELOPER_LINE = "Design and Developer: Ali Rahmani  (github.com/raali09)"
 CONTACT_EMAIL = "rahmaniali09@gmail.com"
 GITHUB_REPO = "raali09/NetSpeedTray"
@@ -49,8 +51,11 @@ SYSTEM_REFRESH_MS = 3000
 TOTALS_SAVE_INTERVAL = 30.0
 EDGE_MARGIN = 10
 SNAP_DISTANCE = 24
-TASKBAR_ALLOWANCE = 48
 UPDATE_CHECK_DELAY_MS = 1800
+CONFIG_SAVE_DEBOUNCE_MS = 700
+PING_INTERVAL = 8.0
+TASKBAR_PROBE_INTERVAL = 1.0
+ZORDER_INTERVAL = 0.25
 
 BG_CARD = "#101820"
 BG_SPEED_ROW = "#1B2733"
@@ -63,7 +68,7 @@ FG_RAM = "#B9C4D0"
 FG_LABEL = "#8290A0"
 FG_TEXT = "#EAF0F6"
 FG_ALERT = "#F27585"
-FG_LOCK_ACTIVE = "#E9B85D"
+FG_LOCK_FLASH = "#F0B45A"
 FG_DIM = "#AAB5C1"
 FG_CHECK = "#55C7F3"
 
@@ -73,11 +78,16 @@ SHADOW_COLOR = "#071019"
 TEXT_SHADOW_OFFSET = 1
 
 FONT_FAMILY = "Segoe UI Variable Text"
-FONT_ICON = (FONT_FAMILY, 8, "bold")
-FONT_VALUE = (FONT_FAMILY, 8, "bold")
-FONT_SYSTEM = (FONT_FAMILY, 7, "bold")
-FONT_TIP = (FONT_FAMILY, 8)
+FONT_SIZE_PROFILES = {
+    "small": {"value": 8, "icon": 8, "system": 7},
+    "medium": {"value": 10, "icon": 9, "system": 8},
+    "large": {"value": 11, "icon": 10, "system": 8},
+    "xlarge": {"value": 12, "icon": 11, "system": 9},
+}
+DEFAULT_FONT_SIZE = "medium"
+
 FONT_MENU = (FONT_FAMILY, 9)
+BG_HOVER = "#243343"
 
 DEFAULT_OPACITY = 0.94
 MIN_OPACITY = 0.20
@@ -97,7 +107,10 @@ CONTENT_PAD_Y = 0
 ICON_GAP = 1
 SEP_PAD = 1
 VALUE_SAMPLE = "999 MB/s"
-BADGE_SAMPLE = "CPU 100%"
+# Padding that used to come free from tk.Label defaults; explicit now that
+# text is measured with font metrics, so the card keeps its old proportions.
+GLYPH_PAD_X = 4
+GLYPH_PAD_Y = 4
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
@@ -114,11 +127,30 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_CONFIG: Dict[str, Any] = {
     "x": None, "y": None, "locked": False, "opacity": DEFAULT_OPACITY,
     "adapter": ALL_ADAPTERS, "show_sysload": True, "compact": False, "ui_version": UI_VERSION,
-    "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0,
+    "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0, "font_size": DEFAULT_FONT_SIZE,
     "daily_date": "", "daily_down": 0, "daily_up": 0,
     "check_updates_on_start": True,
 }
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+LOG_PATH = os.path.join(CONFIG_DIR, "netspeedtray.log")
+
+log = logging.getLogger(APP_NAME)
+
+
+def setup_logging() -> None:
+    """Quiet by default; NETSPEEDTRAY_DEBUG=1 writes a rotating-ish log next to the config."""
+    if log.handlers:
+        return
+    log.setLevel(logging.DEBUG if os.environ.get("NETSPEEDTRAY_DEBUG") else logging.WARNING)
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 512 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".old")
+        handler: logging.Handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    except OSError:
+        handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
 
 
 class RECT(ctypes.Structure):
@@ -135,13 +167,44 @@ class MONITORINFO(ctypes.Structure):
                 ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
 
 
+MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+    ctypes.POINTER(RECT), ctypes.c_ssize_t) if IS_WINDOWS else None
+
+_USER32: Any = None
+_USER32_READY = False
+
+
 def user32():
+    """Cached user32 handle with explicit argtypes (64-bit HWNDs must not truncate)."""
+    global _USER32, _USER32_READY
     if not IS_WINDOWS:
         return None
+    if _USER32_READY:
+        return _USER32
+    _USER32_READY = True
     try:
-        return ctypes.windll.user32
+        u = ctypes.windll.user32
     except Exception:
         return None
+    vp, ci, cl, cu = ctypes.c_void_p, ctypes.c_int, ctypes.c_long, ctypes.c_uint
+    try:
+        u.FindWindowW.restype, u.FindWindowW.argtypes = vp, [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        u.FindWindowExW.restype = vp
+        u.FindWindowExW.argtypes = [vp, vp, ctypes.c_wchar_p, ctypes.c_wchar_p]
+        u.GetWindowRect.argtypes = [vp, ctypes.POINTER(RECT)]
+        u.GetParent.restype, u.GetParent.argtypes = vp, [vp]
+        u.MonitorFromPoint.restype, u.MonitorFromPoint.argtypes = vp, [POINT, cu]
+        u.GetMonitorInfoW.argtypes = [vp, ctypes.POINTER(MONITORINFO)]
+        u.GetWindowLongW.restype, u.GetWindowLongW.argtypes = cl, [vp, ci]
+        u.SetWindowLongW.restype, u.SetWindowLongW.argtypes = cl, [vp, ci, cl]
+        u.SetWindowPos.argtypes = [vp, vp, ci, ci, ci, ci, cu]
+        u.EnumDisplayMonitors.argtypes = [vp, vp, MONITOR_ENUM_PROC, ctypes.c_ssize_t]
+        u.GetForegroundWindow.restype = vp
+    except Exception:
+        pass
+    _USER32 = u
+    return u
 
 
 def monitor_work_area(x: int, y: int) -> Optional[Tuple[int, int, int, int]]:
@@ -165,35 +228,74 @@ def enum_monitor_bounds() -> List[Tuple[int, int, int, int]]:
     if u is None:
         return []
     bounds: List[Tuple[int, int, int, int]] = []
-    proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulonglong, ctypes.c_ulonglong,
-                              ctypes.POINTER(RECT), ctypes.c_double)
 
     def callback(_hmon, _hdc, rect_ptr, _data):
         r = rect_ptr.contents
         bounds.append((r.left, r.top, r.right, r.bottom))
         return 1
+    cb = MONITOR_ENUM_PROC(callback)
     try:
-        u.EnumDisplayMonitors(0, 0, proto(callback), 0)
+        u.EnumDisplayMonitors(None, None, cb, 0)
     except Exception:
         return []
     return bounds
 
 
-def taskbar_bounds() -> Optional[Tuple[int, int, int, int]]:
-    """Return the actual taskbar bounds, including vertical taskbars."""
-    u = user32()
-    if u is None:
+def _window_rect(u, hwnd) -> Optional[Tuple[int, int, int, int]]:
+    if not hwnd:
         return None
+    rect = RECT()
     try:
-        hwnd = u.FindWindowW("Shell_TrayWnd", None)
-        if not hwnd:
-            return None
-        rect = RECT()
         if not u.GetWindowRect(hwnd, ctypes.byref(rect)):
             return None
-        return rect.left, rect.top, rect.right, rect.bottom
     except Exception:
         return None
+    if rect.right <= rect.left or rect.bottom <= rect.top:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def taskbar_bounds_all() -> List[Tuple[int, int, int, int]]:
+    """Every taskbar rectangle: the primary tray plus per-monitor secondary trays."""
+    u = user32()
+    if u is None:
+        return []
+    bars: List[Tuple[int, int, int, int]] = []
+    try:
+        primary = _window_rect(u, u.FindWindowW("Shell_TrayWnd", None))
+        if primary:
+            bars.append(primary)
+        hwnd = None
+        for _ in range(16):
+            hwnd = u.FindWindowExW(None, hwnd, "Shell_SecondaryTrayWnd", None)
+            if not hwnd:
+                break
+            rect = _window_rect(u, hwnd)
+            if rect:
+                bars.append(rect)
+    except Exception:
+        pass
+    return bars
+
+
+def taskbar_bounds(near_x: Optional[int] = None,
+                   near_y: Optional[int] = None) -> Optional[Tuple[int, int, int, int]]:
+    """The taskbar nearest to a point, so multi-monitor docking picks the right bar."""
+    bars = taskbar_bounds_all()
+    if not bars:
+        return None
+    if near_x is None or near_y is None or len(bars) == 1:
+        return bars[0]
+    for left, top, right, bottom in bars:
+        if left <= near_x < right and top <= near_y < bottom:
+            return left, top, right, bottom
+
+    def distance(bar: Tuple[int, int, int, int]) -> float:
+        left, top, right, bottom = bar
+        dx = max(left - near_x, 0, near_x - right)
+        dy = max(top - near_y, 0, near_y - bottom)
+        return float(dx * dx + dy * dy)
+    return min(bars, key=distance)
 
 
 class Config:
@@ -217,9 +319,12 @@ class Config:
         self._sanitize()
 
     def _sanitize(self) -> None:
+        if self.data.get("font_size") not in FONT_SIZE_PROFILES:
+            self.data["font_size"] = DEFAULT_FONT_SIZE
         if not isinstance(self.data.get("adapter"), str):
             self.data["adapter"] = ALL_ADAPTERS
-        for flag in ("locked", "show_sysload", "auto_hide", "snap_edges", "check_updates_on_start"):
+        for flag in ("locked", "show_sysload", "compact", "auto_hide",
+                     "snap_edges", "check_updates_on_start"):
             if not isinstance(self.data.get(flag), bool):
                 self.data[flag] = bool(DEFAULT_CONFIG[flag])
         try:
@@ -238,6 +343,14 @@ class Config:
                 self.data[key] = 0
         if not isinstance(self.data.get("daily_date"), str):
             self.data["daily_date"] = ""
+        for key in ("x", "y"):
+            value = self.data.get(key)
+            if value is None:
+                continue
+            try:
+                self.data[key] = int(value)
+            except (TypeError, ValueError):
+                self.data[key] = None
 
     def migrate(self) -> None:
         try:
@@ -259,8 +372,8 @@ class Config:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.data, fh, indent=2)
             os.replace(tmp, self.path)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("config save failed: %s", exc)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
@@ -282,18 +395,26 @@ def list_adapters() -> List[str]:
     return sorted(up) + sorted(n for n in names if n not in up)
 
 
-def adapter_is_up(name: str) -> bool:
+def adapter_status_map() -> Dict[str, bool]:
+    """Single snapshot of link state; called once per menu rebuild, not once per adapter."""
     try:
-        entry = (psutil.net_if_stats() or {}).get(name)
-        return bool(getattr(entry, "isup", True)) if entry else False
+        return {name: bool(getattr(entry, "isup", True))
+                for name, entry in (psutil.net_if_stats() or {}).items()}
     except Exception:
-        return True
+        return {}
 
 
 def format_speed(value: float) -> str:
     """Compact, stable speed text suitable for a taskbar-sized widget."""
-    kb = max(0.0, value) / 1024.0
-    if kb >= 1024.0:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        val = 0.0
+    kb = max(0.0, val) / 1024.0
+    if kb >= 1023.5 * 1024.0:
+        gb = kb / (1024.0 * 1024.0)
+        return f"{gb:.1f} GB/s" if gb < 100 else f"{gb:.0f} GB/s"
+    if kb >= 1023.5:
         mb = kb / 1024.0
         return f"{mb:.0f} MB/s" if mb >= 100 else f"{mb:.1f} MB/s"
     if kb < 0.5:
@@ -384,6 +505,7 @@ class SpeedMonitor:
 class TotalsTracker:
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.peak_down = self.peak_up = 0.0
         self.session_down = self.session_up = 0
         self.session_start = time.monotonic()
         today = date.today().isoformat()
@@ -406,6 +528,18 @@ class TotalsTracker:
         self.daily_up += up_bytes
         if time.monotonic() - self._last_save >= TOTALS_SAVE_INTERVAL:
             self.flush()
+
+    def note_speed(self, down: float, up: float) -> None:
+        self.peak_down = max(self.peak_down, down)
+        self.peak_up = max(self.peak_up, up)
+
+    def reset_today(self) -> None:
+        self.daily_down = self.daily_up = 0
+        self.session_down = self.session_up = 0
+        self.peak_down = self.peak_up = 0.0
+        self.session_start = time.monotonic()
+        self.config.set("daily_date", date.today().isoformat())
+        self.flush()
 
     def flush(self) -> None:
         self.config.set("daily_down", self.daily_down)
@@ -453,6 +587,20 @@ class ProcessScanner:
     def __init__(self, top_n: int = 5) -> None:
         self.top_n, self.rows = top_n, ["scanning\u2026"]
         self._lock, self._busy, self._last_scan = threading.Lock(), False, 0.0
+        self._name_cache: Dict[int, str] = {}
+
+    def _name_for(self, pid: int) -> str:
+        cached = self._name_cache.get(pid)
+        if cached is not None:
+            return cached
+        try:
+            name = psutil.Process(pid).name()
+        except Exception:
+            name = f"pid {pid}"
+        if len(self._name_cache) > 512:
+            self._name_cache.clear()
+        self._name_cache[pid] = name
+        return name
 
     def maybe_scan(self, force: bool = False) -> None:
         if self._busy or (not force and time.monotonic() - self._last_scan < PROCESS_SCAN_INTERVAL):
@@ -483,10 +631,7 @@ class ProcessScanner:
             else:
                 merged: Dict[str, int] = {}
                 for pid, count in counts.items():
-                    try:
-                        name = psutil.Process(pid).name()
-                    except Exception:
-                        name = f"pid {pid}"
+                    name = self._name_for(pid)
                     merged[name] = merged.get(name, 0) + count
                 ranked = sorted(merged.items(), key=lambda item: item[1], reverse=True)
                 rows = [f"  {shorten(name, 22).ljust(22)}{count:>3} conn" for name, count in ranked[:self.top_n]]
@@ -494,9 +639,10 @@ class ProcessScanner:
                     rows.append(f"  +{len(ranked) - self.top_n} more")
         except Exception:
             rows = ["unavailable"]
-        with self._lock:
-            self.rows = rows
-        self._last_scan, self._busy = time.monotonic(), False
+        finally:
+            with self._lock:
+                self.rows = rows
+            self._last_scan, self._busy = time.monotonic(), False
 
 
 def autostart_command() -> str:
@@ -543,16 +689,37 @@ class UpdateChecker:
         self.error = ""
 
     def fetch_latest(self) -> Optional[Dict[str, Any]]:
+        # GitHub /releases/latest returns 404 if no release is published or only pre-releases exist.
+        headers = {"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"}
+        # Try latest release endpoint first
         try:
-            req = urllib.request.Request(
-                GITHUB_LATEST_URL,
-                headers={"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"},
-            )
+            req = urllib.request.Request(GITHUB_LATEST_URL, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            self.latest = data if isinstance(data, dict) else None
-            self.error = ""
-            return self.latest
+                if isinstance(data, dict) and data.get("tag_name"):
+                    self.latest = data
+                    self.error = ""
+                    return self.latest
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # Fallback: check all releases (includes pre-releases/drafts)
+                try:
+                    rel_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+                    req2 = urllib.request.Request(rel_url, headers=headers)
+                    with urllib.request.urlopen(req2, timeout=10) as resp2:
+                        releases = json.loads(resp2.read().decode("utf-8"))
+                        if isinstance(releases, list) and releases:
+                            self.latest = releases[0]
+                            self.error = ""
+                            return self.latest
+                except Exception:
+                    pass
+                # No published releases found on GitHub repo
+                self.latest = {"tag_name": APP_VERSION, "name": f"v{APP_VERSION}", "body": "You are running the latest build. No newer GitHub release published yet."}
+                self.error = ""
+                return self.latest
+            self.error = f"HTTP Error {exc.code}: {exc.reason}"
+            return None
         except Exception as exc:
             self.error = str(exc)
             return None
@@ -644,31 +811,30 @@ class PingMonitor:
 
     def maybe_probe(self, force: bool = False) -> None:
         now = time.monotonic()
-        if self._busy or (not force and now - self._last < 8.0):
+        if self._busy or (not force and now - self._last < PING_INTERVAL):
             return
         self._busy = True
         threading.Thread(target=self._probe, daemon=True).start()
 
     def _probe(self) -> None:
-        import socket
         result = "--"
-        targets = [("1.1.1.1", 53), ("8.8.8.8", 53)]
-        for host, port in targets:
-            try:
-                t0 = time.perf_counter()
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.75)
-                s.connect((host, port))
-                latency = (time.perf_counter() - t0) * 1000.0
-                s.close()
-                result = f"{latency:.0f} ms"
-                break
-            except Exception:
-                pass
-        with self._lock:
-            self.value = result
-            self._last = time.monotonic()
-            self._busy = False
+        try:
+            for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+                # with-block closes the socket even when connect() times out.
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(0.75)
+                        t0 = time.perf_counter()
+                        sock.connect((host, port))
+                        result = f"{(time.perf_counter() - t0) * 1000.0:.0f} ms"
+                    break
+                except OSError:
+                    continue
+        finally:
+            with self._lock:
+                self.value = result
+                self._last = time.monotonic()
+                self._busy = False
 
 class Tooltip:
     def __init__(self, parent: tk.Misc) -> None:
@@ -690,6 +856,8 @@ class Tooltip:
         self.value_labels[key] = label
 
     def show(self, data: Dict[str, str], anchor: tk.Misc) -> None:
+        if self.window is not None and not self.window.winfo_exists():
+            self.window, self.value_labels = None, {}
         if self.window is None:
             self.window = tk.Toplevel(self.parent)
             self.window.overrideredirect(True)
@@ -727,7 +895,10 @@ class Tooltip:
             if label is not None:
                 label.config(text=value)
         self.foot.config(text=f"{data.get('adapter','')}  ·  {data.get('session','')}")
-        self._place(anchor)
+        try:
+            self._place(anchor)
+        except tk.TclError:
+            self.hide()
 
     def _place(self, anchor: tk.Misc) -> None:
         if self.window is None:
@@ -799,11 +970,13 @@ class AppUsageDashboard:
 
         self.list_frame = tk.Frame(inner, bg=BG_SPEED_ROW, padx=8, pady=8)
         self.list_frame.pack(fill="both", expand=True)
+        self._row_labels = []
+        self._last_rows: List[str] = []
 
         self._refresh_list()
 
         self.window.bind("<Escape>", lambda _e: self.close())
-        self.window.bind("<FocusOut>", lambda _e: self.window.after(200, self.close))
+        self.window.bind("<FocusOut>", lambda _e: self._deferred_close())
         self.window.update_idletasks()
         ww, wh = self.window.winfo_width(), self.window.winfo_height()
         area = monitor_work_area(x, y)
@@ -817,6 +990,14 @@ class AppUsageDashboard:
         # Auto refresh while open
         self._schedule_refresh()
 
+    def _deferred_close(self) -> None:
+        if self.window is None or not self.window.winfo_exists():
+            return
+        try:
+            self.window.after(200, self.close)
+        except tk.TclError:
+            self.close()
+
     def _schedule_refresh(self) -> None:
         if self.window is not None and self.window.winfo_exists():
             self._timer = self.parent.after(2500, self._tick_refresh)
@@ -827,16 +1008,25 @@ class AppUsageDashboard:
         self._schedule_refresh()
 
     def _refresh_list(self) -> None:
-        for child in self.list_frame.winfo_children():
-            child.destroy()
-        rows = self.widget.scanner.snapshot()
-        if not rows:
-            rows = ["No active network connections"]
-        for row_text in rows:
-            line = tk.Frame(self.list_frame, bg=BG_SPEED_ROW)
-            line.pack(fill="x", pady=1)
-            tk.Label(line, text=row_text, bg=BG_SPEED_ROW, fg=FG_TEXT,
-                     font=("Consolas", 8)).pack(anchor="w")
+        """Reuse labels: rebuilding the tree every 2.5s flickered and churned widgets."""
+        if self.window is None or not self.window.winfo_exists():
+            return
+        rows = self.widget.scanner.snapshot() or ["No active network connections"]
+        if rows == self._last_rows:
+            return
+        self._last_rows = list(rows)
+        while len(self._row_labels) < len(rows):
+            label = tk.Label(self.list_frame, text="", bg=BG_SPEED_ROW, fg=FG_TEXT,
+                             font=("Consolas", 8), anchor="w", justify="left")
+            label.pack(fill="x", pady=1)
+            self._row_labels.append(label)
+        for index, label in enumerate(self._row_labels):
+            if index < len(rows):
+                label.config(text=rows[index])
+                if not label.winfo_ismapped():
+                    label.pack(fill="x", pady=1)
+            else:
+                label.pack_forget()
 
 
 class ModernContextPanel:
@@ -844,6 +1034,11 @@ class ModernContextPanel:
         self.widget = widget
         self.window: Optional[tk.Toplevel] = None
         self.dashboard: Optional[AppUsageDashboard] = None
+
+    def close(self) -> None:
+        if self.dashboard is not None:
+            self.dashboard.close()
+        self._close()
 
     def _close(self) -> None:
         if self.window is not None:
@@ -859,10 +1054,26 @@ class ModernContextPanel:
                  font=(FONT_FAMILY, 8), anchor="w").pack(side="left", padx=8, pady=5)
         tk.Label(row, text=value, bg=BG_CARD, fg=FG_LABEL,
                  font=(FONT_FAMILY, 7), anchor="e").pack(side="right", padx=8)
+        def paint(color: str) -> None:
+            row.config(bg=color)
+            for child in row.winfo_children():
+                try:
+                    child.config(bg=color)
+                except tk.TclError:
+                    pass
+
         for item in (row, *row.winfo_children()):
-            item.bind("<Button-1>", lambda _e: (command(), self._close()))
-            item.bind("<Enter>", lambda _e, r=row: r.config(bg=BG_SPEED_ROW))
-            item.bind("<Leave>", lambda _e, r=row: r.config(bg=BG_CARD))
+            item.bind("<Button-1>", lambda _e: (self._close(), command()))
+            item.bind("<Enter>", lambda _e: paint(BG_SPEED_ROW))
+            item.bind("<Leave>", lambda _e: paint(BG_CARD))
+
+    def _deferred_close(self) -> None:
+        if self.window is None or not self.window.winfo_exists():
+            return
+        try:
+            self.window.after(140, self._close)
+        except tk.TclError:
+            self._close()
 
     def _open_dashboard(self, x: int, y: int) -> None:
         if self.dashboard is None:
@@ -898,18 +1109,32 @@ class ModernContextPanel:
                  font=(FONT_FAMILY, 8, "bold"), anchor="w").pack(anchor="w")
         tk.Label(dev_frame, text="  github.com/raali09", bg=BG_SPEED_ROW, fg=FG_DIM,
                  font=(FONT_FAMILY, 7), anchor="w").pack(anchor="w", pady=(1, 0))
+        def paint_dev(color: str) -> None:
+            dev_frame.config(bg=color)
+            for child in dev_frame.winfo_children():
+                try:
+                    child.config(bg=color)
+                except tk.TclError:
+                    pass
+
         for item in (dev_frame, *dev_frame.winfo_children()):
-            item.bind("<Button-1>", lambda _e: (self._open_github(), self._close()))
-            item.bind("<Enter>", lambda _e: dev_frame.config(bg="#243343"))
-            item.bind("<Leave>", lambda _e: dev_frame.config(bg=BG_SPEED_ROW))
+            item.bind("<Button-1>", lambda _e: (self._close(), self._open_github()))
+            item.bind("<Enter>", lambda _e: paint_dev(BG_HOVER))
+            item.bind("<Leave>", lambda _e: paint_dev(BG_SPEED_ROW))
 
         # Features & Settings Rows
         self._row(inner, "📊 App Network Usage", "Open", lambda: self._open_dashboard(x, y), accent=FG_DOWN)
         self._row(inner, "Lock position", "ON" if w.locked else "OFF", w.toggle_lock)
         self._row(inner, "Show CPU / RAM", "ON" if w.sysload_var.get() else "OFF",
                   lambda: (w.sysload_var.set(not w.sysload_var.get()), w._on_toggle_sysload()))
+        self._row(inner, "Compact taskbar mode", "ON" if w.compact_var.get() else "OFF",
+                  lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
+        self._row(inner, "Auto-hide when idle", "ON" if w.autohide_var.get() else "OFF",
+                  lambda: (w.autohide_var.set(not w.autohide_var.get()), w._on_toggle_autohide()))
         self._row(inner, "Snap to Taskbar", "ON" if w.snap_var.get() else "OFF",
                   lambda: (w.snap_var.set(not w.snap_var.get()), w._on_toggle_snap()))
+        self._row(inner, "Font size", w.font_size_key.capitalize(),
+                  lambda: w.font_menu.post(x, y))
         self._row(inner, "Network adapter", shorten(w.adapter if w.adapter != ALL_ADAPTERS else "All adapters", 18),
                   lambda: w.adapter_menu.post(x, y))
         self._row(inner, "Transparency", f"{int(w.opacity * 100)}%", w._open_opacity_popup)
@@ -918,11 +1143,13 @@ class ModernContextPanel:
         sep.pack(fill="x", padx=6, pady=5)
 
         self._row(inner, "Reset position", "", w.reset_position)
+        self._row(inner, "Reset today's totals",
+                  format_bytes(w.totals.daily_down + w.totals.daily_up), w.reset_totals)
         self._row(inner, "Check for updates", "", w._check_for_updates_manual)
         self._row(inner, "Exit", "", w.quit)
 
         self.window.bind("<Escape>", lambda _e: self._close())
-        self.window.bind("<FocusOut>", lambda _e: self.window.after(120, self._close))
+        self.window.bind("<FocusOut>", lambda _e: self._deferred_close())
         self.window.update_idletasks()
         area = monitor_work_area(x, y)
         ww, wh = self.window.winfo_width(), self.window.winfo_height()
@@ -941,6 +1168,7 @@ class OpacityPopup:
         self.scale: Optional[tk.Scale] = None
         self.value_label: Optional[tk.Label] = None
         self.fill_bar: Optional[tk.Frame] = None
+        self.var: Optional[tk.DoubleVar] = None
         self._original_opacity: float = widget.opacity
 
     @property
@@ -978,9 +1206,11 @@ class OpacityPopup:
         self.fill_bar = tk.Frame(track_holder, bg=FG_DOWN, width=int(180 * self.widget.opacity))
         self.fill_bar.pack(side="left", fill="y")
 
+        # The DoubleVar must be referenced; an inline one gets garbage collected.
+        self.var = tk.DoubleVar(value=self.widget.opacity)
         self.scale = tk.Scale(inner, from_=MIN_OPACITY, to=MAX_OPACITY,
                              resolution=0.01, orient="horizontal",
-                             variable=tk.DoubleVar(value=self.widget.opacity),
+                             variable=self.var,
                              bg=BG_CARD, fg=FG_TEXT, troughcolor=BG_SPEED_ROW,
                              highlightthickness=0, bd=0,
                              activebackground=BG_SPEED_ROW,
@@ -1066,9 +1296,11 @@ class OpacityPopup:
             except tk.TclError:
                 pass
             self.window = None
+        self.widget.flush_config()
         self.scale = None
         self.value_label = None
         self.fill_bar = None
+        self.var = None
 
 
 class UpdateDialog:
@@ -1239,6 +1471,10 @@ class SpeedWidget:
         self.config.migrate()
         self.locked = bool(self.config.get("locked", False))
         self.compact = bool(self.config.get("compact", False))
+        self.font_size_key = str(self.config.get("font_size", DEFAULT_FONT_SIZE))
+        if self.font_size_key not in FONT_SIZE_PROFILES:
+            self.font_size_key = DEFAULT_FONT_SIZE
+        self._apply_font_profile(self.font_size_key)
         self.opacity = float(self.config.get("opacity", DEFAULT_OPACITY))
         self.adapter = str(self.config.get("adapter", ALL_ADAPTERS))
         self.adapters = list_adapters()
@@ -1261,7 +1497,9 @@ class SpeedWidget:
         self._cached_taskbar: Optional[Tuple[int, int, int, int]] = None
         self._drag_offset: Optional[Tuple[int, int]] = None
         self._after_id = self._tip_after_id = self._hide_after_id = None
+        self._flash_after_id = self._save_after_id = None
         self._lock_flash = False
+        self._alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024.0 * 1024.0
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
         self._suppress_bg_sync = False
@@ -1386,23 +1624,49 @@ class SpeedWidget:
         except Exception:
             pass
 
+    def _apply_font_profile(self, key: str) -> None:
+        profile = FONT_SIZE_PROFILES.get(key, FONT_SIZE_PROFILES[DEFAULT_FONT_SIZE])
+        self.font_icon = (FONT_FAMILY, profile["icon"], "bold")
+        self.font_value = (FONT_FAMILY, profile["value"], "bold")
+        self.font_system = (FONT_FAMILY, profile["system"], "bold")
+
+    def set_font_size(self, key: str) -> None:
+        if key not in FONT_SIZE_PROFILES:
+            return
+        self.font_size_key = key
+        self.config.set("font_size", key, save=True)
+        if hasattr(self, "font_size_var"):
+            self.font_size_var.set(key)
+        self._apply_font_profile(key)
+        self._measure_layout()
+        self._refresh_layout()
+
+    def _font_for(self, font: Tuple[str, int, str]) -> tkfont.Font:
+        cached = self._font_cache.get(font)
+        if cached is None:
+            cached = tkfont.Font(root=self.root, font=font)
+            self._font_cache[font] = cached
+        return cached
+
     def _text_size(self, text: str, font: Tuple[str, int, str]) -> Tuple[int, int]:
-        probe = tk.Label(self.root, text=text, font=font)
-        size = probe.winfo_reqwidth(), probe.winfo_reqheight()
-        probe.destroy()
-        return size
+        # Cached font metrics: creating/destroying a Label per measurement was
+        # dozens of widget round-trips on every font or layout change.
+        measured = self._font_for(font)
+        return measured.measure(text), measured.metrics("linespace")
 
     def _measure_layout(self) -> None:
         self.ui_scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
         self.radius = int(round(CORNER_RADIUS * self.ui_scale))
         self.border = max(1, int(round(CARD_BORDER * self.ui_scale)))
-        self.icon_px = self._text_size("\u2193", FONT_ICON)[0]
-        self._value_px_max = self._text_size(VALUE_SAMPLE, FONT_VALUE)[0]
-        self.badge_px = max(self._text_size("CPU 100%", FONT_SYSTEM)[0],
-                            self._text_size("RAM 100%", FONT_SYSTEM)[0])
-        self.row_h = max(self._text_size("0 KB/s", FONT_VALUE)[1],
-                         self._text_size("\u2193", FONT_ICON)[1],
-                         self._text_size("CPU --", FONT_SYSTEM)[1])
+        pad_x = int(round(GLYPH_PAD_X * self.ui_scale))
+        pad_y = int(round(GLYPH_PAD_Y * self.ui_scale))
+        self.icon_px = self._text_size("\u2193", self.font_icon)[0] + pad_x
+        self._value_px_max = self._text_size(VALUE_SAMPLE, self.font_value)[0] + pad_x
+        self.badge_px = max(self._text_size("CPU 100%", self.font_system)[0],
+                            self._text_size("RAM 100%", self.font_system)[0]) + pad_x
+        self.row_h = max(self._text_size("0 KB/s", self.font_value)[1],
+                         self._text_size("\u2193", self.font_icon)[1],
+                         self._text_size("CPU --", self.font_system)[1]) + pad_y
         self.value_px = self._value_px_max
         self._recompute_width()
 
@@ -1427,15 +1691,6 @@ class SpeedWidget:
         self.window_width = int(max(WINDOW_WIDTH,
                                     content + 2 * (self.border + CONTENT_PAD_X)))
 
-    def _measure_text_width(self, text: str, font: Tuple[str, int, str]) -> int:
-        if font not in self._font_cache:
-            self._font_cache[font] = tkfont.Font(font=font)
-        return self._font_cache[font].measure(text)
-
-    def _update_value_width(self, down_text: str, up_text: str) -> None:
-        # Fixed columns prevent distracting horizontal jumps.
-        return
-
     def _relayout(self) -> None:
         self._recompute_width()
         self._rebuild_text_items()
@@ -1455,33 +1710,41 @@ class SpeedWidget:
         left = self.border + CONTENT_PAD_X
         speed_right = left + self.icon_px + ICON_GAP + self.value_px
         if self.compact:
-            self._make_text("down_icon", left, self._row_y(0), self._current_texts["down_icon"], FONT_ICON, self._current_colors["down_icon"], "w")
-            self._make_text("down_value", speed_right, self._row_y(0), self._current_texts["down_value"], FONT_VALUE, self._current_colors["down_value"], "e")
+            self._make_text("down_icon", left, self._row_y(0), self._current_texts["down_icon"], self.font_icon, self._current_colors["down_icon"], "w")
+            self._make_text("down_value", speed_right, self._row_y(0), self._current_texts["down_value"], self.font_value, self._current_colors["down_value"], "e")
             up_left = speed_right + SEP_PAD
             up_right = up_left + self.icon_px + ICON_GAP + self.value_px
-            self._make_text("up_icon", up_left, self._row_y(0), self._current_texts["up_icon"], FONT_ICON, self._current_colors["up_icon"], "w")
-            self._make_text("up_value", up_right, self._row_y(0), self._current_texts["up_value"], FONT_VALUE, self._current_colors["up_value"], "e")
+            self._make_text("up_icon", up_left, self._row_y(0), self._current_texts["up_icon"], self.font_icon, self._current_colors["up_icon"], "w")
+            self._make_text("up_value", up_right, self._row_y(0), self._current_texts["up_value"], self.font_value, self._current_colors["up_value"], "e")
         else:
-            self._make_text("down_icon", left, self._row_y(0), self._current_texts["down_icon"], FONT_ICON, self._current_colors["down_icon"], "w")
-            self._make_text("down_value", speed_right, self._row_y(0), self._current_texts["down_value"], FONT_VALUE, self._current_colors["down_value"], "e")
-            self._make_text("up_icon", left, self._row_y(1), self._current_texts["up_icon"], FONT_ICON, self._current_colors["up_icon"], "w")
-            self._make_text("up_value", speed_right, self._row_y(1), self._current_texts["up_value"], FONT_VALUE, self._current_colors["up_value"], "e")
+            self._make_text("down_icon", left, self._row_y(0), self._current_texts["down_icon"], self.font_icon, self._current_colors["down_icon"], "w")
+            self._make_text("down_value", speed_right, self._row_y(0), self._current_texts["down_value"], self.font_value, self._current_colors["down_value"], "e")
+            self._make_text("up_icon", left, self._row_y(1), self._current_texts["up_icon"], self.font_icon, self._current_colors["up_icon"], "w")
+            self._make_text("up_value", speed_right, self._row_y(1), self._current_texts["up_value"], self.font_value, self._current_colors["up_value"], "e")
 
         if self._include_sysload():
             sep_x = speed_right + SEP_PAD
             badge_right = self.window_width - self.border - CONTENT_PAD_X
             self._make_text("cpu_badge", badge_right, self._row_y(0),
-                            self._current_texts["cpu_badge"], FONT_SYSTEM,
+                            self._current_texts["cpu_badge"], self.font_system,
                             self._current_colors["cpu_badge"], "e")
             self._make_text("ram_badge", badge_right, self._row_y(1),
-                            self._current_texts["ram_badge"], FONT_SYSTEM,
+                            self._current_texts["ram_badge"], self.font_system,
                             self._current_colors["ram_badge"], "e")
-            if self.bg_canvas is not None:
-                sep_top = self.border + CONTENT_PAD_Y + 2
-                sep_bot = self._card_h - self.border - CONTENT_PAD_Y - 2
-                self._sep_line = self.bg_canvas.create_line(
-                    sep_x, sep_top, sep_x, sep_bot,
-                    fill=BORDER_SOFT, width=1, tags="dynamic_sep")
+            self._draw_separator(self._card_h)
+
+    def _draw_separator(self, height: int) -> None:
+        if self.bg_canvas is None:
+            return
+        self.bg_canvas.delete("dynamic_sep")
+        self._sep_line = None
+        if not self._include_sysload():
+            return
+        sep_x = (self.border + CONTENT_PAD_X + self.icon_px + ICON_GAP + self.value_px + SEP_PAD)
+        self._sep_line = self.bg_canvas.create_line(
+            sep_x, self.border + CONTENT_PAD_Y + 2,
+            sep_x, height - self.border - CONTENT_PAD_Y - 2,
+            fill=BORDER_SOFT, width=1, tags="dynamic_sep")
 
     def _row_y(self, row: int) -> float:
         return self.border + CONTENT_PAD_Y + row * self.row_h + self.row_h / 2.0
@@ -1568,9 +1831,10 @@ class SpeedWidget:
             self.bg_canvas.tag_lower(item)
 
     def _border_color(self) -> str:
-        if self._lock_flash:
-            return FG_ALERT
-        return FG_LOCK_ACTIVE if self.locked else BORDER_COLOR
+        # Locking no longer recolors the card: the border stays the neutral
+        # slate tone. The only visual cue is a brief flash when a drag is
+        # blocked, plus the checkmark in the menu.
+        return FG_LOCK_FLASH if self._lock_flash else BORDER_COLOR
 
     def _sync_layer_geometry(self, x: int, y: int, width: int, height: int) -> None:
         """Move both layers atomically enough to avoid a one-frame ghost/offset."""
@@ -1583,7 +1847,6 @@ class SpeedWidget:
         height = max(rows * self.row_h + 2 * (self.border + CONTENT_PAD_Y),
                      2 * self.radius + 4)
         self._card_w, self._card_h = self.window_width, height
-        self.canvas.config(width=self.window_width, height=height)
         if x is None or y is None:
             x, y = self.root.winfo_x(), self.root.winfo_y()
         self._sync_layer_geometry(int(x), int(y), self.window_width, height)
@@ -1591,16 +1854,8 @@ class SpeedWidget:
             self.canvas.config(width=self.window_width, height=height)
         if self.bg_window is not None and self.bg_canvas is not None:
             self.bg_canvas.config(width=self.window_width, height=height)
-            self.bg_window.geometry(f"{self.window_width}x{height}+{int(x)}+{int(y)}")
             self._draw_card(self.window_width, height)
-            if self._include_sysload():
-                self.bg_canvas.delete("dynamic_sep")
-                sep_x = (self.border + CONTENT_PAD_X + self.icon_px +
-                         ICON_GAP + self.value_px + SEP_PAD)
-                self._sep_line = self.bg_canvas.create_line(
-                    sep_x, self.border + CONTENT_PAD_Y + 2,
-                    sep_x, height - self.border - CONTENT_PAD_Y - 2,
-                    fill=BORDER_SOFT, width=1, tags="dynamic_sep")
+            self._draw_separator(height)
         self.root.update_idletasks()
         self._raise_windows(force=True)
 
@@ -1620,12 +1875,14 @@ class SpeedWidget:
             self._enforce_locked_position()
 
     def _first_system_sample(self) -> None:
-        if not self._closing and self.sysload_var.get():
+        if not self._closing:
             self._update_system_labels()
 
     def _update_system_labels(self) -> None:
         self.sysload.sample()
         self._last_system_sample = time.monotonic()
+        if not self._include_sysload():
+            return
         cpu_text, ram_text = self.sysload.text_short()
         self._set_text("cpu_badge", cpu_text)
         self._set_text("ram_badge", ram_text)
@@ -1652,6 +1909,15 @@ class SpeedWidget:
         self.compact_var = tk.BooleanVar(value=self.compact)
         self.menu.add_checkbutton(label="Compact taskbar mode", variable=self.compact_var,
                                    command=self._on_toggle_compact, selectcolor=FG_CHECK)
+        self.font_size_var = tk.StringVar(value=self.font_size_key)
+        self.font_menu = tk.Menu(self.menu, **menu_opts)
+        for fkey in ("small", "medium", "large", "xlarge"):
+            self.font_menu.add_radiobutton(
+                label=fkey.capitalize(), value=fkey,
+                variable=self.font_size_var,
+                command=lambda k=fkey: self.set_font_size(k),
+                selectcolor=FG_CHECK)
+        self.menu.add_cascade(label="Font size", menu=self.font_menu)
         self.menu.add_command(label="Background transparency\u2026", command=self._open_opacity_popup)
         self.autohide_var = tk.BooleanVar(value=bool(self.config.get("auto_hide")))
         self.menu.add_checkbutton(label="Auto-hide when idle", variable=self.autohide_var,
@@ -1674,10 +1940,12 @@ class SpeedWidget:
                                    command=self._on_toggle_autostart, selectcolor=FG_CHECK)
         self.menu.add_separator()
         self.menu.add_command(label="Reset position", command=self.reset_position)
+        self.menu.add_command(label="Reset today's totals", command=self.reset_totals)
         self.menu.add_separator()
         self.menu.add_command(label="Exit", command=self.quit)
 
     def _populate_adapter_menu(self) -> None:
+        status = adapter_status_map()
         self.adapter_menu.delete(0, "end")
         self.adapter_menu.add_radiobutton(
             label="All adapters (total)", value=ALL_ADAPTERS,
@@ -1687,7 +1955,7 @@ class SpeedWidget:
         if not self.adapters:
             self.adapter_menu.add_command(label="No adapters found", state="disabled")
         for name in self.adapters:
-            marker = "" if adapter_is_up(name) else "   (down)"
+            marker = "" if status.get(name, True) else "   (down)"
             self.adapter_menu.add_radiobutton(
                 label=shorten(name) + marker, value=name,
                 variable=self.adapter_var, command=self._on_select_adapter,
@@ -1696,7 +1964,10 @@ class SpeedWidget:
         self.adapter_menu.add_command(label="Refresh list", command=self.refresh_adapters)
 
     def refresh_adapters(self) -> None:
-        self.adapters = list_adapters()
+        adapters = list_adapters()
+        if adapters == self.adapters:
+            return
+        self.adapters = adapters
         self._populate_adapter_menu()
         if self.adapter != ALL_ADAPTERS and self.adapter not in self.adapters:
             self.adapter = ALL_ADAPTERS
@@ -1723,14 +1994,30 @@ class SpeedWidget:
     def _open_opacity_popup(self) -> None:
         self.opacity_popup.toggle()
 
+    def _schedule_config_save(self) -> None:
+        """Coalesce writes: dragging the opacity slider used to hit the disk per pixel."""
+        if self._save_after_id is not None:
+            return
+        self._save_after_id = self.root.after(CONFIG_SAVE_DEBOUNCE_MS, self.flush_config)
+
+    def flush_config(self) -> None:
+        if self._save_after_id is not None:
+            try: self.root.after_cancel(self._save_after_id)
+            except tk.TclError: pass
+            self._save_after_id = None
+        self.config.save()
+
     def set_opacity(self, value: float) -> None:
-        self.opacity = min(MAX_OPACITY, max(MIN_OPACITY, float(value)))
-        self.config.set("opacity", self.opacity, save=True)
+        value = min(MAX_OPACITY, max(MIN_OPACITY, float(value)))
+        if abs(value - self.opacity) < 0.005:
+            return
+        self.opacity = value
+        self.config.set("opacity", self.opacity)
+        self._schedule_config_save()
         try:
             self.root.attributes("-alpha", 1.0)
             if self.bg_window is not None:
                 self.bg_window.attributes("-alpha", self._window_alpha())
-                self._draw_card(self._card_w, self._card_h)
         except tk.TclError:
             pass
 
@@ -1745,8 +2032,18 @@ class SpeedWidget:
         self.config.set("snap_edges", bool(self.snap_var.get()), save=True)
 
     def _on_select_alert(self) -> None:
+        self._alert_bps = float(self.alert_var.get()) * 1024.0 * 1024.0
         self.config.set("alert_mbps", float(self.alert_var.get()), save=True)
         self._refresh_labels(self.last_down, self.last_up)
+
+    def _safe_after(self, callback: Callable[[], None], delay: int = 0) -> None:
+        """Hop a worker-thread result back onto the Tk loop without racing shutdown."""
+        if self._closing:
+            return
+        try:
+            self.root.after(delay, callback)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _maybe_check_updates_on_start(self) -> None:
         if not self.config.get("check_updates_on_start", True):
@@ -1758,7 +2055,7 @@ class SpeedWidget:
             return
         latest_version = UpdateChecker.latest_version(data)
         if UpdateChecker.is_newer(latest_version, APP_VERSION):
-            self.root.after(0, lambda: self._show_update_dialog(data))
+            self._safe_after(lambda: self._show_update_dialog(data))
 
     def _check_for_updates_manual(self) -> None:
         if self._closing:
@@ -1771,9 +2068,7 @@ class SpeedWidget:
                 pass
 
         def cb(data: Optional[Dict[str, Any]]) -> None:
-            if self._closing:
-                return
-            self.root.after(0, lambda: self._after_manual_check(data, menu_index))
+            self._safe_after(lambda: self._after_manual_check(data, menu_index))
 
         self.update_checker.check_async(cb)
 
@@ -1838,21 +2133,26 @@ class SpeedWidget:
 
     def _taskbar_rect_cached(self, force: bool = False) -> Optional[Tuple[int, int, int, int]]:
         now = time.monotonic()
-        if force or self._cached_taskbar is None or now - self._last_taskbar_probe >= 1.0:
-            self._cached_taskbar = taskbar_bounds()
+        if force or self._cached_taskbar is None or now - self._last_taskbar_probe >= TASKBAR_PROBE_INTERVAL:
+            try:
+                cx = self.root.winfo_x() + self.window_width // 2
+                cy = self.root.winfo_y() + self._card_h // 2
+            except tk.TclError:
+                cx = cy = None
+            self._cached_taskbar = taskbar_bounds(cx, cy)
             self._last_taskbar_probe = now
         return self._cached_taskbar
 
     def _position_in_taskbar(self, x: int, y: int) -> bool:
-        taskbar = self._taskbar_rect_cached(force=True)
+        taskbar = taskbar_bounds(x + self.window_width // 2, y + self._card_h // 2)
         if not taskbar:
             return False
         return self._window_rect_overlaps(x, y, self.window_width, self._card_h, taskbar)
 
     def _raise_windows(self, force: bool = False) -> None:
-        """Keep both transparent layers above an always-on-top Taskbar without focus stealing."""
+        """Keep both layers above an always-on-top Taskbar without stealing focus."""
         now = time.monotonic()
-        if not force and now - self._last_raise < 0.10:
+        if not force and now - self._last_raise < ZORDER_INTERVAL:
             return
         self._last_raise = now
         u = user32()
@@ -1876,13 +2176,13 @@ class SpeedWidget:
                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
             except Exception:
                 pass
-        try:
-            self.root.lift()
-            if self.bg_window is not None:
-                self.bg_window.lift()
+        if force:
+            try:
+                if self.bg_window is not None:
+                    self.bg_window.lift()
                 self.root.lift()
-        except tk.TclError:
-            pass
+            except tk.TclError:
+                pass
 
     def _enforce_taskbar_dock(self) -> None:
         if not self._taskbar_docked or not self.config.get("snap_edges"):
@@ -1911,7 +2211,8 @@ class SpeedWidget:
 
     def _default_position(self) -> Tuple[int, int]:
         w, h = self.window_width, self._card_h
-        taskbar = taskbar_bounds()
+        taskbar = taskbar_bounds(self.root.winfo_screenwidth() // 2,
+                                self.root.winfo_screenheight() - 1)
         work = monitor_work_area(self.root.winfo_screenwidth() // 2,
                                  self.root.winfo_screenheight() // 2)
         if taskbar and work:
@@ -1956,7 +2257,7 @@ class SpeedWidget:
     def _snap_position(self, x: int, y: int) -> Tuple[int, int]:
         self.root.update_idletasks()
         w, h = self.root.winfo_width(), self.root.winfo_height()
-        taskbar = taskbar_bounds()
+        taskbar = taskbar_bounds(x + w // 2, y + h // 2)
         if taskbar:
             tl, tt, tr, tb = taskbar
             overlap = x < tr and x + w > tl and y < tb and y + h > tt
@@ -1990,6 +2291,11 @@ class SpeedWidget:
         self.config.set("x", int(self.root.winfo_x()))
         self.config.set("y", int(self.root.winfo_y()), save=True)
 
+    def reset_totals(self) -> None:
+        self.totals.reset_today()
+        if self.tooltip.visible:
+            self.tooltip.show(self._tooltip_data(), self.root)
+
     def toggle_lock(self) -> None:
         self.locked = not self.locked
         self.lock_var.set(self.locked)
@@ -2002,36 +2308,43 @@ class SpeedWidget:
         self._draw_card(self._card_w, self._card_h)
 
     def _flash_lock(self) -> None:
+        if self._flash_after_id is not None:
+            try: self.root.after_cancel(self._flash_after_id)
+            except tk.TclError: pass
+            self._flash_after_id = None
         self._lock_flash = True
         self._draw_card(self._card_w, self._card_h)
-        self.root.after(450, self._clear_lock_flash)
+        self._flash_after_id = self.root.after(450, self._clear_lock_flash)
 
     def _clear_lock_flash(self) -> None:
+        self._flash_after_id = None
         self._lock_flash = False
         self._draw_card(self._card_w, self._card_h)
 
     def _bind_events(self) -> None:
+        # Double-click used to quit the app instantly and Escape killed it too;
+        # both were far too easy to trigger by accident. Double-click now
+        # toggles compact mode and exit lives in the right-click menu only.
         for widget in self._all_widgets():
             widget.bind("<Button-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
             widget.bind("<ButtonRelease-1>", self._on_drag_end)
             widget.bind("<Button-3>", self._on_right_click)
-            widget.bind("<Double-Button-1>", lambda _event: self.quit())
+            widget.bind("<Double-Button-1>", self._on_double_click)
             widget.bind("<Enter>", self._on_enter)
             widget.bind("<Leave>", self._on_leave)
-        if self.bg_window is not None:
-            self.bg_window.bind("<Button-1>", self._on_drag_start)
-            self.bg_window.bind("<B1-Motion>", self._on_drag_move)
-            self.bg_window.bind("<ButtonRelease-1>", self._on_drag_end)
-            self.bg_window.bind("<Button-3>", self._on_right_click)
-            self.bg_window.bind("<Double-Button-1>", lambda _event: self.quit())
         self.root.bind("<FocusIn>", lambda _event: self._raise_windows(force=True))
         self.root.bind("<Visibility>", lambda _event: self._raise_windows(force=True))
         if self.bg_window is not None:
             self.bg_window.bind("<FocusIn>", lambda _event: self._raise_windows(force=True))
             self.bg_window.bind("<Visibility>", lambda _event: self._raise_windows(force=True))
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        self.root.bind("<Escape>", lambda _event: self.quit())
+        self.root.bind("<Escape>", lambda _event: self.tooltip.hide())
+
+    def _on_double_click(self, _event: "tk.Event") -> None:
+        self.tooltip.hide()
+        self.compact_var.set(not self.compact_var.get())
+        self._on_toggle_compact()
 
     def _on_enter(self, _event: "tk.Event") -> None:
         self._cancel_tip_timers()
@@ -2051,7 +2364,8 @@ class SpeedWidget:
                 setattr(self, attr, None)
 
     def _show_tooltip(self) -> None:
-        self.scanner.maybe_scan(force=True)
+        # net_connections() is expensive and the tooltip never showed the
+        # process list; only the dashboard needs a scan.
         self.tooltip.show(self._tooltip_data(), self.root)
 
     def _tooltip_data(self) -> Dict[str, str]:
@@ -2064,7 +2378,9 @@ class SpeedWidget:
             "ram": ram_text.replace("RAM ", ""),
             "ping": self.ping.value,
             "adapter": shorten("All adapters" if self.adapter == ALL_ADAPTERS else self.adapter, 22),
-            "session": f"today {format_bytes(self.totals.daily_down + self.totals.daily_up)}",
+            "session": (f"today {format_bytes(self.totals.daily_down + self.totals.daily_up)}"
+                        f"  ·  up {format_duration(self.totals.session_seconds)}"
+                        f"  ·  peak {format_speed(self.totals.peak_down)}"),
         }
 
     def _on_drag_start(self, event: "tk.Event") -> None:
@@ -2105,16 +2421,18 @@ class SpeedWidget:
             down, up, down_bytes, up_bytes = self.monitor.sample()
             self.last_down, self.last_up = down, up
             self.totals.add(down_bytes, up_bytes)
+            self.totals.note_speed(down, up)
             self._refresh_labels(down, up)
             self._update_idle_state(down, up)
         except Exception:
-            pass
+            log.debug("sample failed", exc_info=True)
         now = time.monotonic()
-        if self.sysload_var.get() and now - self._last_system_sample >= SYSTEM_REFRESH_MS / 1000.0:
+        needs_system = self._include_sysload() or self.tooltip.visible
+        if needs_system and now - self._last_system_sample >= SYSTEM_REFRESH_MS / 1000.0:
             try:
                 self._update_system_labels()
             except Exception:
-                pass
+                log.debug("system sample failed", exc_info=True)
         try:
             self._enforce_taskbar_dock()
             self._raise_windows()
@@ -2127,11 +2445,10 @@ class SpeedWidget:
                 self._last_adapter_refresh = now
             if self.locked: self._enforce_locked_position()
             if self.tooltip.visible and now - self._last_tooltip_refresh >= TOOLTIP_REFRESH_INTERVAL:
-                self.scanner.maybe_scan()
                 self.tooltip.show(self._tooltip_data(), self.root)
                 self._last_tooltip_refresh = now
         except Exception:
-            pass
+            log.debug("tick housekeeping failed", exc_info=True)
         self._after_id = self.root.after(REFRESH_MS, self._tick)
 
     def _update_idle_state(self, down: float, up: float) -> None:
@@ -2150,7 +2467,9 @@ class SpeedWidget:
         if faded == self._faded: return
         self._faded = faded
         try:
-            self.root.attributes("-alpha", 1.0)
+            # Fade the text layer too: fading only the card left the numbers
+            # at full strength, so auto-hide barely did anything.
+            self.root.attributes("-alpha", self._idle_alpha() if faded else 1.0)
             if self.bg_window is not None:
                 self.bg_window.attributes("-alpha", self._idle_alpha() if faded else self._window_alpha())
         except tk.TclError:
@@ -2162,14 +2481,13 @@ class SpeedWidget:
             self._move_windows(x, y)
 
     def _refresh_labels(self, down: float, up: float) -> None:
-        alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024 * 1024
+        alert_bps = self._alert_bps
         down_text = format_speed(down)
         up_text = format_speed(up)
         self._set_text("down_value", down_text,
                        FG_ALERT if alert_bps and down >= alert_bps else FG_DOWN)
         self._set_text("up_value", up_text,
                        FG_ALERT if alert_bps and up >= alert_bps else FG_UP)
-        self._update_value_width(down_text, up_text)
 
     def render_state(self) -> Dict[str, Any]:
         """Return the geometry/opacity contract used by visual regression tests."""
@@ -2189,12 +2507,15 @@ class SpeedWidget:
     def quit(self) -> None:
         if self._closing: return
         self._closing = True
-        for handle in (self._after_id, self._tip_after_id, self._hide_after_id):
+        for handle in (self._after_id, self._tip_after_id, self._hide_after_id,
+                       self._flash_after_id, self._save_after_id):
             if handle is not None:
                 try: self.root.after_cancel(handle)
                 except tk.TclError: pass
+        self._after_id = self._tip_after_id = self._hide_after_id = None
+        self._flash_after_id = self._save_after_id = None
         self.tooltip.hide()
-        self.context_panel._close()
+        self.context_panel.close()
         self.opacity_popup.close()
         self._save_position()
         self.totals.flush()
@@ -2211,7 +2532,29 @@ class SpeedWidget:
         except KeyboardInterrupt: self.quit()
 
 
+_instance_mutex: Any = None
+
+
+def claim_single_instance() -> bool:
+    """A second launch used to stack another widget on the taskbar."""
+    global _instance_mutex
+    if not IS_WINDOWS:
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        _instance_mutex = kernel32.CreateMutexW(None, 1, f"Local\\{APP_NAME}_singleton")
+        return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True
+
+
 def main() -> int:
+    setup_logging()
+    if "--version" in sys.argv or "-v" in sys.argv:
+        print(f"{APP_NAME} {APP_VERSION}")
+        return 0
     # Multi-DPI V2 awareness for crisp rendering across multi-monitor setups
     if IS_WINDOWS:
         try:
@@ -2249,7 +2592,19 @@ def main() -> int:
             return 2
         print("Up to date.")
         return 0
-    SpeedWidget().run()
+    if not claim_single_instance():
+        log.warning("another instance is already running")
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0, f"{APP_NAME} is already running.", APP_NAME, 0x40)
+        except Exception:
+            pass
+        return 0
+    try:
+        SpeedWidget().run()
+    except Exception:
+        log.exception("fatal error")
+        raise
     return 0
 
 
