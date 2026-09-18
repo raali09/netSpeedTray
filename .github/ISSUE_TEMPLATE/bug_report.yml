@@ -1,0 +1,119 @@
+name: Bug report
+description: Report something that is broken or behaves unexpectedly in NetSpeedTray
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in the form below —
+        the more detail you give, the faster we can reproduce and fix it.
+
+        The maintainer is Ali Rahmani (github.com/raali09). Be kind; this is a hobby project.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps you took. If you can reproduce it consistently, say so.
+      placeholder: |
+        1. Launch NetSpeedTray
+        2. Right-click the card
+        3. Choose '...'
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened, including any error message shown.
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: e.g. Windows 11 23H2 (Build 22631.3447), Windows 10 22H2
+      placeholder: "Windows 11 23H2 (Build 22631.xxxx)"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: If you run from source. If you use the .exe, write "using the .exe".
+      placeholder: "Python 3.13.1  /  using the .exe"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: monitor-setup
+    attributes:
+      label: Monitor setup
+      description: How many monitors, and which one is the primary.
+      options:
+        - Single monitor
+        - Multi-monitor — primary is the built-in laptop screen
+        - Multi-monitor — primary is an external monitor
+        - Multi-monitor — primary changes (e.g. docked/undocked frequently)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: netspeedtray-version
+    attributes:
+      label: NetSpeedTray version
+      description: Shown in the right-click menu ▸ About, or printed by `--check-updates`.
+      placeholder: "2.7.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: |
+        Attach the contents of `%APPDATA%\NetSpeedTray\netspeedtray.log` (paste the
+        relevant lines). This file is created automatically and captures the last error.
+        Drag-and-drop the file here or paste its text.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Optional — drag-and-drop images of the card, menu or error dialog.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of conduct
+      description: By submitting, you agree to be respectful in follow-up comments.
+      options:
+        - label: I agree to follow the project's code of conduct
+          required: true

@@ -1,1 +1,9 @@
+# Runtime dependencies (required to run NetSpeedTray)
 psutil>=5.9
+
+# Optional / dev dependencies below.
+# Pillow is only needed to regenerate the app icon (run: python make_icon.py).
+Pillow>=10.0
+
+# pytest is only needed to run the test suite (run: pytest tests/).
+pytest>=7.0

@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest a new feature or an improvement to an existing one
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a feature! Please describe the problem
+        you are trying to solve first — that helps us evaluate the proposed solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that NetSpeedTray currently does not let you?
+      placeholder: "I want to see ..., but right now I have to ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you would like NetSpeedTray to do instead. Be as specific as you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other ways you thought about solving this, and why they are worse.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — screenshots, mock-ups, links to similar features in other apps.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of conduct
+      description: By submitting, you agree to be respectful in follow-up comments.
+      options:
+        - label: I agree to follow the project's code of conduct
+          required: true

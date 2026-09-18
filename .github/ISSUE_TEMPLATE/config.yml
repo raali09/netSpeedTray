@@ -1,0 +1,11 @@
+# GitHub issue-template config.
+# Disable free-form issues so reporters pick a structured form — it captures the
+# information (Windows version, monitor layout, logs, etc.) that triage actually needs.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Start a discussion
+    url: https://github.com/raali09/NetSpeedTray/discussions
+    about: For questions, ideas and "how do I…" topics that are not bugs or feature requests.
+  - name: 📧 Email the maintainer
+    url: mailto:rahmaniali09@gmail.com
+    about: Email Ali Rahmani directly for anything you would rather not post publicly.

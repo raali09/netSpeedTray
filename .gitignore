@@ -4,6 +4,8 @@ __pycache__/
 build/
 dist/
 *.spec
+# Keep our project spec under version control
+!netspeedtray.spec
 
 .venv/
 venv/

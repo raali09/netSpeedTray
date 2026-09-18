@@ -12,17 +12,21 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+from tkinter import simpledialog
 import urllib.error
 import urllib.request
 import webbrowser
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from contextlib import contextmanager
 
 try:
     import psutil
 except ImportError:
     _MSG = "psutil is required.\n\nInstall it with:\n    pip install psutil"
     try:
+        # 0x10 == MB_ICONERROR. The named constant is defined later in the
+        # module, so the literal is used here (this runs at import time).
         ctypes.windll.user32.MessageBoxW(0, _MSG, "NetSpeedTray", 0x10)
     except Exception:
         print(_MSG, file=sys.stderr)
@@ -34,12 +38,40 @@ except ImportError:
     winreg = None
 
 APP_NAME = "NetSpeedTray"
-APP_VERSION = "2.6.0"
 DEVELOPER_LINE = "Design and Developer: Ali Rahmani  (github.com/raali09)"
 CONTACT_EMAIL = "rahmaniali09@gmail.com"
 GITHUB_REPO = "raali09/NetSpeedTray"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+def _read_version() -> str:
+    """Read the application version from the VERSION file next to the source.
+
+    Falls back to a sane default if the file is missing (e.g. running from a
+    stripped checkout) so the app never fails to start over a version string.
+    """
+    candidates: List[str] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(os.path.join(meipass, "VERSION"))
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "VERSION"))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.normpath(os.path.join(script_dir, "..", "VERSION")))
+    candidates.append(os.path.join(script_dir, "VERSION"))
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                ver = fh.read().strip()
+            if ver:
+                return ver
+        except OSError:
+            continue
+    return "2.7.0"
+
+
+APP_VERSION = _read_version()
 
 IS_WINDOWS = sys.platform == "win32"
 REFRESH_MS = 1000
@@ -56,6 +88,12 @@ CONFIG_SAVE_DEBOUNCE_MS = 700
 PING_INTERVAL = 8.0
 TASKBAR_PROBE_INTERVAL = 1.0
 ZORDER_INTERVAL = 0.25
+TASKBAR_CACHE_TTL = 2.0
+# Adaptive z-order: run fast while the widget keeps losing z-order (e.g. right
+# after a primary-display swap or while dragging), then throttle back to idle.
+ZORDER_INTERVAL_ACTIVE = 0.15
+ZORDER_INTERVAL_IDLE = 0.75
+ZORDER_IDLE_GRACE = 5.0
 
 BG_CARD = "#101820"
 BG_SPEED_ROW = "#1B2733"
@@ -77,7 +115,41 @@ FG_TRANSPARENT_KEY = "#0D0E0F"
 SHADOW_COLOR = "#071019"
 TEXT_SHADOW_OFFSET = 1
 
-FONT_FAMILY = "Segoe UI Variable Text"
+
+def _resolve_font_family() -> str:
+    """Pick the best available UI font on this Windows install.
+
+    "Segoe UI Variable Text" only ships with Windows 11; on Windows 10 we fall
+    back to "Segoe UI", then "Tahoma" (present since XP), then tkinter's
+    default so the widget never renders in an ugly bitmap font.
+
+    Returns the Windows-11 font eagerly at import time (before a Tk root
+    exists); the real selection is re-run lazily from ``SpeedWidget.__init__``
+    once a root window is available, via :func:`refresh_font_family`.
+    """
+    candidates = ("Segoe UI Variable Text", "Segoe UI", "Tahoma",
+                  "Microsoft YaHei UI", "DejaVu Sans")
+    try:
+        available = set(tkfont.families())
+    except Exception:
+        # No Tk root yet (import time). Return the best-guess; the widget
+        # re-resolves after its root window is created.
+        return candidates[0]
+    for name in candidates:
+        if name in available:
+            return name
+    return "TkDefaultFont"
+
+
+def refresh_font_family() -> str:
+    """Re-resolve the UI font once a Tk root exists and cache it globally."""
+    global FONT_FAMILY, FONT_MENU
+    FONT_FAMILY = _resolve_font_family()
+    FONT_MENU = (FONT_FAMILY, 9)
+    return FONT_FAMILY
+
+
+FONT_FAMILY = _resolve_font_family()
 FONT_SIZE_PROFILES = {
     "small": {"value": 8, "icon": 8, "system": 7},
     "medium": {"value": 10, "icon": 9, "system": 8},
@@ -97,11 +169,26 @@ IDLE_BPS = 1024
 IDLE_TICKS = 5
 ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
-UI_VERSION = 21
+UI_VERSION = 22
+
+# Corner-radius appearance choices (user-selectable from the menu).
+CORNER_RADIUS_CHOICES = {
+    "sharp": 0,
+    "small": 4,
+    "medium": 7,   # historic default
+    "large": 11,
+    "pill": 16,
+}
+DEFAULT_CORNER_RADIUS = "medium"
+
+# Sparkline (mini speed chart) configuration.
+SPARKLINE_SAMPLES = 60          # 60 seconds of history at 1 Hz
+SPARKLINE_WIDTH = 150
+SPARKLINE_HEIGHT = 38
 
 WINDOW_WIDTH = 0
 CARD_BORDER = 1
-CORNER_RADIUS = 7
+CORNER_RADIUS = CORNER_RADIUS_CHOICES[DEFAULT_CORNER_RADIUS]
 CONTENT_PAD_X = 2
 CONTENT_PAD_Y = 0
 ICON_GAP = 1
@@ -112,6 +199,7 @@ VALUE_SAMPLE = "999 MB/s"
 GLYPH_PAD_X = 4
 GLYPH_PAD_Y = 4
 GWL_EXSTYLE = -20
+GWLP_HWNDPARENT = -8
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 MONITOR_DEFAULTTONEAREST = 2
@@ -121,6 +209,17 @@ SWP_NOSIZE = 0x0001
 SWP_SHOWWINDOW = 0x0040
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
+# Win32 magic numbers used elsewhere in the file, named for readability.
+CREATE_NO_WINDOW = 0x08000000      # subprocess creation flag (no console flash)
+MB_ICONERROR = 0x00000010          # MessageBox: error icon
+MB_ICONINFORMATION = 0x00000040    # MessageBox: info icon
+ERROR_ALREADY_EXISTS = 183         # CreateMutex: mutex already existed
+# DPI awareness context values (SetProcessDpiAwarenessContext).
+DPI_AWARENESS_PER_MONITOR_V2 = -4
+DPI_AWARENESS_PER_MONITOR = 2
+# High-contrast: SystemParametersInfo action codes.
+SPI_GETHIGHCONTRAST = 0x0042
+HCF_HIGHCONTRASTON = 0x00000001
 
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -128,6 +227,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "x": None, "y": None, "locked": False, "opacity": DEFAULT_OPACITY,
     "adapter": ALL_ADAPTERS, "show_sysload": True, "compact": False, "ui_version": UI_VERSION,
     "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0, "font_size": DEFAULT_FONT_SIZE,
+    "corner_radius": DEFAULT_CORNER_RADIUS,
+    "ping_host": "", "ping_port": 53,
     "daily_date": "", "daily_down": 0, "daily_up": 0,
     "check_updates_on_start": True,
 }
@@ -135,6 +236,10 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 LOG_PATH = os.path.join(CONFIG_DIR, "netspeedtray.log")
 
 log = logging.getLogger(APP_NAME)
+
+
+class _StopLoop(Exception):
+    """Internal control-flow signal to break out of a nested adapter scan."""
 
 
 def setup_logging() -> None:
@@ -198,6 +303,10 @@ def user32():
         u.GetMonitorInfoW.argtypes = [vp, ctypes.POINTER(MONITORINFO)]
         u.GetWindowLongW.restype, u.GetWindowLongW.argtypes = cl, [vp, ci]
         u.SetWindowLongW.restype, u.SetWindowLongW.argtypes = cl, [vp, ci, cl]
+        if hasattr(u, "SetWindowLongPtrW"):
+            u.SetWindowLongPtrW.restype, u.SetWindowLongPtrW.argtypes = vp, [vp, ci, vp]
+        else:
+            u.SetWindowLongPtrW = u.SetWindowLongW
         u.SetWindowPos.argtypes = [vp, vp, ci, ci, ci, ci, cu]
         u.EnumDisplayMonitors.argtypes = [vp, vp, MONITOR_ENUM_PROC, ctypes.c_ssize_t]
         u.GetForegroundWindow.restype = vp
@@ -255,47 +364,100 @@ def _window_rect(u, hwnd) -> Optional[Tuple[int, int, int, int]]:
     return rect.left, rect.top, rect.right, rect.bottom
 
 
-def taskbar_bounds_all() -> List[Tuple[int, int, int, int]]:
-    """Every taskbar rectangle: the primary tray plus per-monitor secondary trays."""
+# Module-level cache for taskbar HWNDs/rects. ``taskbar_entries()`` does up to
+# 17 FindWindow(Ex) calls; during a drag it ran several times per second and
+# showed up in profiling. Cache it for TASKBAR_CACHE_TTL seconds.
+_taskbar_cache: Tuple[float, List[Tuple[Any, Tuple[int, int, int, int]]]] = (0.0, [])
+
+
+def taskbar_entries(force: bool = False) -> List[Tuple[Any, Tuple[int, int, int, int]]]:
+    """Every taskbar HWND and its bounding rect (primary + secondary monitors).
+
+    Results are cached for :data:`TASKBAR_CACHE_TTL` seconds; pass
+    ``force=True`` to bypass the cache (used right after a display change).
+    """
+    global _taskbar_cache
+    now = time.monotonic()
+    cached_at, cached = _taskbar_cache
+    if not force and cached and now - cached_at < TASKBAR_CACHE_TTL:
+        return cached
     u = user32()
     if u is None:
         return []
-    bars: List[Tuple[int, int, int, int]] = []
+    entries: List[Tuple[Any, Tuple[int, int, int, int]]] = []
     try:
-        primary = _window_rect(u, u.FindWindowW("Shell_TrayWnd", None))
-        if primary:
-            bars.append(primary)
-        hwnd = None
-        for _ in range(16):
-            hwnd = u.FindWindowExW(None, hwnd, "Shell_SecondaryTrayWnd", None)
-            if not hwnd:
-                break
-            rect = _window_rect(u, hwnd)
+        primary_hwnd = u.FindWindowW("Shell_TrayWnd", None)
+        if primary_hwnd:
+            rect = _window_rect(u, primary_hwnd)
             if rect:
-                bars.append(rect)
+                entries.append((primary_hwnd, rect))
+        sec_hwnd = None
+        for _ in range(16):
+            sec_hwnd = u.FindWindowExW(None, sec_hwnd, "Shell_SecondaryTrayWnd", None)
+            if not sec_hwnd:
+                break
+            rect = _window_rect(u, sec_hwnd)
+            if rect:
+                entries.append((sec_hwnd, rect))
     except Exception:
-        pass
-    return bars
+        log.debug("taskbar_entries failed", exc_info=True)
+    _taskbar_cache = (now, entries)
+    return entries
+
+
+def is_high_contrast() -> bool:
+    """True when the Windows High Contrast accessibility theme is active.
+
+    In that mode our dark card palette clashes with the system colors, so the
+    widget falls back to the system "BUTTONFACE"/window colors for the card
+    background and uses the system text color for readings.
+    """
+    if not IS_WINDOWS:
+        return False
+    u = user32()
+    if u is None:
+        return False
+    try:
+        class HIGHCONTRASTW(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwFlags", ctypes.c_uint),
+                        ("lpszDefaultScheme", ctypes.c_void_p)]
+        hc = HIGHCONTRASTW()
+        hc.cbSize = ctypes.sizeof(HIGHCONTRASTW)
+        if u.SystemParametersInfoW(SPI_GETHIGHCONTRAST, ctypes.sizeof(hc),
+                                   ctypes.byref(hc), 0):
+            return bool(hc.dwFlags & HCF_HIGHCONTRASTON)
+    except Exception:
+        log.debug("high-contrast probe failed", exc_info=True)
+    return False
+
+
+def taskbar_entry_near(near_x: Optional[int] = None,
+                       near_y: Optional[int] = None) -> Optional[Tuple[Any, Tuple[int, int, int, int]]]:
+    entries = taskbar_entries()
+    if not entries:
+        return None
+    if near_x is None or near_y is None or len(entries) == 1:
+        return entries[0]
+    for hwnd, (left, top, right, bottom) in entries:
+        if left <= near_x < right and top <= near_y < bottom:
+            return hwnd, (left, top, right, bottom)
+
+    def distance(entry: Tuple[Any, Tuple[int, int, int, int]]) -> float:
+        left, top, right, bottom = entry[1]
+        dx = max(left - near_x, 0, near_x - right)
+        dy = max(top - near_y, 0, near_y - bottom)
+        return float(dx * dx + dy * dy)
+    return min(entries, key=distance)
+
+
+def taskbar_bounds_all() -> List[Tuple[int, int, int, int]]:
+    return [rect for _hwnd, rect in taskbar_entries()]
 
 
 def taskbar_bounds(near_x: Optional[int] = None,
                    near_y: Optional[int] = None) -> Optional[Tuple[int, int, int, int]]:
-    """The taskbar nearest to a point, so multi-monitor docking picks the right bar."""
-    bars = taskbar_bounds_all()
-    if not bars:
-        return None
-    if near_x is None or near_y is None or len(bars) == 1:
-        return bars[0]
-    for left, top, right, bottom in bars:
-        if left <= near_x < right and top <= near_y < bottom:
-            return left, top, right, bottom
-
-    def distance(bar: Tuple[int, int, int, int]) -> float:
-        left, top, right, bottom = bar
-        dx = max(left - near_x, 0, near_x - right)
-        dy = max(top - near_y, 0, near_y - bottom)
-        return float(dx * dx + dy * dy)
-    return min(bars, key=distance)
+    entry = taskbar_entry_near(near_x, near_y)
+    return entry[1] if entry else None
 
 
 class Config:
@@ -353,17 +515,30 @@ class Config:
                 self.data[key] = None
 
     def migrate(self) -> None:
+        """Run forward-only schema migrations keyed on ``ui_version``.
+
+        Each step is guarded by its own version check so that a brand-new
+        install (version 0) and an upgrade from an older release both land on
+        the current schema. New keys are added here as ``elif old_version < N``.
+        """
         try:
             old_version = int(self.data.get("ui_version", 0))
         except (TypeError, ValueError):
             old_version = 0
-        if old_version < UI_VERSION:
-            if "show_sysload" not in self.loaded_keys or old_version < 2:
-                self.data["show_sysload"] = True
-            if old_version < 6:
-                self.data["check_updates_on_start"] = True
-            self.data["ui_version"] = UI_VERSION
-            self.save()
+        if old_version >= UI_VERSION:
+            return
+        if "show_sysload" not in self.loaded_keys or old_version < 2:
+            self.data["show_sysload"] = True
+        if old_version < 6:
+            self.data["check_updates_on_start"] = True
+        if old_version < 22:
+            # v2.7.0: new appearance & ping options. Keep existing values when
+            # present so a user's saved radius is not clobbered on upgrade.
+            self.data.setdefault("corner_radius", DEFAULT_CORNER_RADIUS)
+            self.data.setdefault("ping_host", "")
+            self.data.setdefault("ping_port", 53)
+        self.data["ui_version"] = UI_VERSION
+        self.save()
 
     def save(self) -> None:
         try:
@@ -380,94 +555,46 @@ class Config:
 
     def set(self, key: str, value: Any, save: bool = False) -> None:
         self.data[key] = value
-        if save:
+        if save and not getattr(self, "_batch_suspended", False):
+            self.save()
+
+    def set_many(self, items: Dict[str, Any], save: bool = True) -> None:
+        """Set several keys in one shot, persisting at most once.
+
+        Replaces the common pattern of several ``set(..., save=True)`` calls
+        back-to-back (e.g. on reset_totals) which used to hit the disk per key.
+        """
+        self.data.update(items)
+        if save and not getattr(self, "_batch_suspended", False):
+            self.save()
+
+    @contextmanager
+    def batch(self) -> "Iterator[Config]":
+        """Context manager that coalesces all ``set`` calls into one save.
+
+        >>> with config.batch() as cfg:
+        ...     cfg.set("daily_down", 0)
+        ...     cfg.set("daily_up", 0)
+        # one disk write at exit
+        """
+        self._batch_suspended = True
+        try:
+            yield self
+        finally:
+            self._batch_suspended = False
             self.save()
 
 
-def list_adapters() -> List[str]:
-    try:
-        counters = psutil.net_io_counters(pernic=True) or {}
-        stats = psutil.net_if_stats() or {}
-    except Exception:
-        return []
-    names = list(counters)
-    up = [n for n in names if getattr(stats.get(n), "isup", True)]
-    return sorted(up) + sorted(n for n in names if n not in up)
-
-
-def adapter_status_map() -> Dict[str, bool]:
-    """Single snapshot of link state; called once per menu rebuild, not once per adapter."""
-    try:
-        return {name: bool(getattr(entry, "isup", True))
-                for name, entry in (psutil.net_if_stats() or {}).items()}
-    except Exception:
-        return {}
-
-
-def format_speed(value: float) -> str:
-    """Compact, stable speed text suitable for a taskbar-sized widget."""
-    try:
-        val = float(value)
-    except (TypeError, ValueError):
-        val = 0.0
-    kb = max(0.0, val) / 1024.0
-    if kb >= 1023.5 * 1024.0:
-        gb = kb / (1024.0 * 1024.0)
-        return f"{gb:.1f} GB/s" if gb < 100 else f"{gb:.0f} GB/s"
-    if kb >= 1023.5:
-        mb = kb / 1024.0
-        return f"{mb:.0f} MB/s" if mb >= 100 else f"{mb:.1f} MB/s"
-    if kb < 0.5:
-        return "0 KB/s"
-    return f"{kb:.0f} KB/s"
-
-
-def format_bytes(total: float) -> str:
-    if total < 1024:
-        return f"{int(total)} B"
-    for unit in ("KB", "MB", "GB", "TB"):
-        total /= 1024.0
-        if total < 1024:
-            return f"{total:.{0 if unit == 'KB' else 2}f} {unit}"
-    return f"{total:.2f} PB"
-
-
-def format_duration(seconds: float) -> str:
-    seconds = int(max(0, seconds))
-    hours, rem = divmod(seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    return f"{hours}h {minutes:02d}m" if hours else (f"{minutes}m {secs:02d}s" if minutes else f"{secs}s")
-
-
-def shorten(name: str, width: int = 32) -> str:
-    return name if len(name) <= width else name[:width - 1] + "\u2026"
-
-
-def compare_versions(a: str, b: str) -> int:
-    def parts(v: str) -> List[int]:
-        out: List[int] = []
-        for part in v.lstrip("vV").split("."):
-            digits = ""
-            for ch in part:
-                if ch.isdigit():
-                    digits += ch
-                else:
-                    break
-            try:
-                out.append(int(digits) if digits else 0)
-            except ValueError:
-                out.append(0)
-        return out
-    pa, pb = parts(a), parts(b)
-    while len(pa) < len(pb):
-        pa.append(0)
-    while len(pb) < len(pa):
-        pb.append(0)
-    for x, y in zip(pa, pb):
-        if x != y:
-            return -1 if x < y else 1
-    return 0
-
+# --- Pure utility functions live in the net_speed package ---------------------
+# The format_*/compare_versions/shorten/list_adapters helpers have no tkinter
+# or Win32 dependencies, so they were extracted into net_speed.utils for
+# unit-testability and a smaller top-level module. They are re-exported here so
+# existing ``netspeedtray.format_speed`` style access keeps working.
+from net_speed.utils import (
+    list_adapters, adapter_status_map,
+    format_speed, format_bytes, format_duration, shorten,
+    compare_versions, _maybe_int,
+)
 
 class SpeedMonitor:
     def __init__(self, adapter: str = ALL_ADAPTERS) -> None:
@@ -519,9 +646,18 @@ class TotalsTracker:
 
     def add(self, down_bytes: int, up_bytes: int) -> None:
         today = date.today().isoformat()
-        if self.config.get("daily_date") != today:
-            self.config.set("daily_date", today)
+        stored = str(self.config.get("daily_date", ""))
+        # Only roll over when the calendar genuinely advanced. If the system
+        # clock was wound *backwards* (stored == future, or today < stored
+        # lexicographically for ISO dates) we keep accumulating into the stored
+        # day instead of zeroing the counters, so a clock correction cannot
+        # silently wipe a session's totals.
+        if stored and today > stored:
+            self.config.set_many({"daily_date": today,
+                                  "daily_down": 0, "daily_up": 0}, save=False)
             self.daily_down = self.daily_up = 0
+        elif not stored:
+            self.config.set("daily_date", today, save=False)
         self.session_down += down_bytes
         self.session_up += up_bytes
         self.daily_down += down_bytes
@@ -538,13 +674,15 @@ class TotalsTracker:
         self.session_down = self.session_up = 0
         self.peak_down = self.peak_up = 0.0
         self.session_start = time.monotonic()
-        self.config.set("daily_date", date.today().isoformat())
-        self.flush()
+        # Persist the date change and the zeroed totals in a single write.
+        self.config.set_many({"daily_date": date.today().isoformat(),
+                              "daily_down": 0, "daily_up": 0}, save=True)
+        self._last_save = time.monotonic()
 
     def flush(self) -> None:
-        self.config.set("daily_down", self.daily_down)
-        self.config.set("daily_up", self.daily_up)
-        self.config.save()
+        # Coalesce the two counter writes + the save into one disk hit.
+        self.config.set_many({"daily_down": self.daily_down,
+                              "daily_up": self.daily_up}, save=True)
         self._last_save = time.monotonic()
 
     @property
@@ -689,6 +827,14 @@ class UpdateChecker:
         self.error = ""
 
     def fetch_latest(self) -> Optional[Dict[str, Any]]:
+        """Fetch the latest release metadata from GitHub.
+
+        Returns ``None`` (and sets :attr:`error`) when there is no published
+        release at all — previously a *fake* release echoing the current
+        version was synthesised, which was misleading because ``is_newer``
+        then always returned False and the dialog showed phantom release notes
+        that did not actually exist on GitHub.
+        """
         # GitHub /releases/latest returns 404 if no release is published or only pre-releases exist.
         headers = {"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"}
         # Try latest release endpoint first
@@ -713,11 +859,12 @@ class UpdateChecker:
                             self.error = ""
                             return self.latest
                 except Exception:
-                    pass
-                # No published releases found on GitHub repo
-                self.latest = {"tag_name": APP_VERSION, "name": f"v{APP_VERSION}", "body": "You are running the latest build. No newer GitHub release published yet."}
-                self.error = ""
-                return self.latest
+                    log.debug("releases fallback failed", exc_info=True)
+                # No published releases found on the repo. Surface this as an
+                # explicit state instead of fabricating a fake "latest".
+                self.latest = None
+                self.error = "No releases published yet."
+                return None
             self.error = f"HTTP Error {exc.code}: {exc.reason}"
             return None
         except Exception as exc:
@@ -776,38 +923,95 @@ def download_update(asset_url: str, dest_path: str,
 
 
 def install_update(temp_exe: str) -> bool:
+    """Spawn a helper batch that swaps the running exe for the downloaded one.
+
+    The previous version ``del /f /q``'d the live exe and then ``copy``'d; if
+    the app had not fully released the file handle yet (the quit path is
+    async), the delete silently failed and the copy overwrote a half-locked
+    file, leaving a broken binary. We now rename the running exe to ``.old``
+    first (rename succeeds even on a running exe), copy the new one in, then
+    delete the ``.old`` on the next launch. A retry loop also covers the rare
+    case where an antivirus briefly holds the file.
+    """
     if not getattr(sys, "frozen", False):
         return False
     current_exe = sys.executable
     if not current_exe or not os.path.exists(current_exe):
         return False
-    updater_path = os.path.join(tempfile.gettempdir(), "netspeedtray_updater.bat")
+    # Keep the updater in the user's AppData (not shared %TEMP%) so another
+    # user on the machine cannot plant a replacement batch file.
+    updater_dir = os.path.join(CONFIG_DIR, "updater")
+    try:
+        os.makedirs(updater_dir, exist_ok=True)
+    except OSError:
+        updater_dir = tempfile.gettempdir()
+    updater_path = os.path.join(updater_dir, "netspeedtray_updater.bat")
+    backup_exe = current_exe + ".old"
+    cur_name = os.path.basename(current_exe)
+    backup_name = os.path.basename(backup_exe)
     try:
         with open(updater_path, "w", encoding="utf-8") as fh:
             fh.write("@echo off\r\n")
             fh.write("timeout /t 2 /nobreak >nul\r\n")
-            fh.write(f'del /f /q "{current_exe}" >nul 2>&1\r\n')
+            # Best-effort cleanup of a previous backup from an older update.
+            fh.write(f'del /f /q "{backup_exe}" >nul 2>&1\r\n')
+            # Move the running binary aside (works even while it is running),
+            # then install the new one. Rename is atomic on the same volume.
+            fh.write('rename "' + current_exe + '" "' + backup_name + '" >nul 2>&1\r\n')
+            # Retry the copy a few times in case AV still holds a brief lock.
+            fh.write("set /a tries=0\r\n")
+            fh.write(":copyloop\r\n")
             fh.write(f'copy /y "{temp_exe}" "{current_exe}" >nul 2>&1\r\n')
-            fh.write(f'del /f /q "{temp_exe}" >nul 2>&1\r\n')
+            fh.write(f'if exist "{current_exe}" goto copied\r\n')
+            fh.write("set /a tries+=1\r\n")
+            fh.write("if %tries% lss 10 (timeout /t 1 /nobreak >nul & goto copyloop)\r\n")
+            # If copy never succeeded, restore the backup so the app still runs.
+            fh.write('if not exist "' + current_exe + '" rename "' + backup_exe + '" "' + cur_name + '" >nul 2>&1\r\n')
+            fh.write(":copied\r\n")
             fh.write(f'start "" "{current_exe}"\r\n')
+            fh.write(f'del /f /q "{backup_exe}" >nul 2>&1\r\n')
+            fh.write(f'del /f /q "{temp_exe}" >nul 2>&1\r\n')
             fh.write('del /f /q "%~f0" >nul 2>&1\r\n')
     except OSError:
+        log.warning("updater script write failed", exc_info=True)
         return False
     try:
         subprocess.Popen(["cmd", "/c", updater_path],
-                         creationflags=0x08000000, close_fds=True)
+                         creationflags=CREATE_NO_WINDOW, close_fds=True)
         return True
     except Exception:
         return False
 
 
 class PingMonitor:
-    """Non-blocking, cached latency probe using fast TCP handshake without subprocess overhead."""
-    def __init__(self) -> None:
+    """Non-blocking, cached latency probe using a fast TCP handshake.
+
+    Uses a TCP ``connect()`` round-trip rather than raw ICMP because ICMP needs
+    administrator privileges on Windows. The connect time is a good proxy for
+    network latency to a well-known anycast endpoint (Cloudflare/Google DNS by
+    default), but it is *not* identical to an ICMP ping — see Known Limitations
+    in the README. The user can override the target host/port from the menu.
+    """
+    DEFAULT_TARGETS: List[Tuple[str, int]] = [("1.1.1.1", 53), ("8.8.8.8", 53)]
+
+    def __init__(self, host: str = "", port: int = 53) -> None:
         self.value = "--"
         self._last = 0.0
         self._busy = False
         self._lock = threading.Lock()
+        self.set_target(host, port)
+
+    def set_target(self, host: str, port: int) -> None:
+        """Configure a custom ping target, or revert to the defaults when empty."""
+        host = (host or "").strip()
+        if host:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                port = 53
+            self._targets: List[Tuple[str, int]] = [(host, max(1, min(65535, port)))]
+        else:
+            self._targets = list(self.DEFAULT_TARGETS)
 
     def maybe_probe(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -819,7 +1023,7 @@ class PingMonitor:
     def _probe(self) -> None:
         result = "--"
         try:
-            for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+            for host, port in self._targets:
                 # with-block closes the socket even when connect() times out.
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -837,27 +1041,46 @@ class PingMonitor:
                 self._busy = False
 
 class Tooltip:
+    """Hover flyout with live metrics, a mini speed sparkline and net info.
+
+    Fonts scale with the system DPI (older builds used fixed size-7/9 which was
+    nearly unreadable on a 150% display). The sparkline is a tiny Canvas that
+    redraws from the widget's rolling 60-sample history each refresh.
+    """
+
     def __init__(self, parent: tk.Misc) -> None:
         self.parent, self.window = parent, None
         self.value_labels: Dict[str, tk.Label] = {}
+        self.spark_canvas: Optional[tk.Canvas] = None
+        self.net_label: Optional[tk.Label] = None
+        self.proc_label: Optional[tk.Label] = None
 
     @property
     def visible(self) -> bool:
         return self.window is not None and self.window.winfo_exists()
 
+    def _scale(self, pts: int) -> int:
+        """Scale a font point size by the system DPI (1.0 at 96 DPI)."""
+        try:
+            scale = max(1.0, float(self.parent.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            scale = 1.0
+        return max(6, int(round(pts * scale)))
+
     def _metric(self, parent: tk.Misc, key: str, title: str, color: str) -> None:
         cell = tk.Frame(parent, bg=BG_SPEED_ROW, padx=7, pady=5)
         cell.pack(side="left", fill="both", expand=True, padx=(0, 3))
         tk.Label(cell, text=title, bg=BG_SPEED_ROW, fg=FG_LABEL,
-                 font=(FONT_FAMILY, 7), anchor="w").pack(anchor="w")
+                 font=(FONT_FAMILY, self._scale(7)), anchor="w").pack(anchor="w")
         label = tk.Label(cell, text="--", bg=BG_SPEED_ROW, fg=color,
-                         font=(FONT_FAMILY, 9, "bold"), anchor="w")
+                         font=(FONT_FAMILY, self._scale(9), "bold"), anchor="w")
         label.pack(anchor="w", pady=(1, 0))
         self.value_labels[key] = label
 
-    def show(self, data: Dict[str, str], anchor: tk.Misc) -> None:
+    def show(self, data: Dict[str, Any], anchor: tk.Misc) -> None:
         if self.window is not None and not self.window.winfo_exists():
             self.window, self.value_labels = None, {}
+            self.spark_canvas = None
         if self.window is None:
             self.window = tk.Toplevel(self.parent)
             self.window.overrideredirect(True)
@@ -868,37 +1091,93 @@ class Tooltip:
             head = tk.Frame(inner, bg=BG_CARD)
             head.pack(fill="x", pady=(0, 7))
             tk.Label(head, text=APP_NAME, bg=BG_CARD, fg=FG_TEXT,
-                     font=(FONT_FAMILY, 9, "bold")).pack(side="left")
+                     font=(FONT_FAMILY, self._scale(9), "bold")).pack(side="left")
             tk.Label(head, text="LIVE", bg=BG_CARD, fg=FG_DOWN,
-                     font=(FONT_FAMILY, 7, "bold")).pack(side="right")
+                     font=(FONT_FAMILY, self._scale(7), "bold")).pack(side="right")
             self.speed_row = tk.Frame(inner, bg=BG_CARD)
             self.speed_row.pack(fill="x", pady=(0, 4))
             self._metric(self.speed_row, "down", "DOWNLOAD", FG_DOWN)
             self._metric(self.speed_row, "up", "UPLOAD", FG_UP)
+            # Sparkline (mini line chart of the last 60s of download speed).
+            spark_holder = tk.Frame(inner, bg=BG_SPEED_ROW, padx=4, pady=4)
+            spark_holder.pack(fill="x", pady=(0, 4))
+            tk.Label(spark_holder, text="speed (last 60s)", bg=BG_SPEED_ROW,
+                     fg=FG_LABEL, font=(FONT_FAMILY, self._scale(7)),
+                     anchor="w").pack(anchor="w")
+            self.spark_canvas = tk.Canvas(spark_holder, bg=BG_SPEED_ROW,
+                                          highlightthickness=0, bd=0,
+                                          width=SPARKLINE_WIDTH,
+                                          height=SPARKLINE_HEIGHT)
+            self.spark_canvas.pack(fill="x", pady=(2, 0))
             self.system_row = tk.Frame(inner, bg=BG_CARD)
             self.system_row.pack(fill="x", pady=(0, 5))
             self._metric(self.system_row, "cpu", "CPU", FG_CPU)
             self._metric(self.system_row, "ram", "RAM", FG_RAM)
             self._metric(self.system_row, "ping", "PING", FG_DIM)
+            # Network info row (local IP / public IP / Wi-Fi signal).
+            self.net_label = tk.Label(inner, text="", bg=BG_CARD, fg=FG_DIM,
+                                      font=(FONT_FAMILY, self._scale(7)),
+                                      anchor="w", justify="left")
+            self.net_label.pack(fill="x", pady=(0, 4))
             sep = tk.Frame(inner, height=1, bg=BORDER_SOFT)
             sep.pack(fill="x", pady=(2, 6))
+            # Per-process speed row (top apps by sampled bandwidth).
+            self.proc_label = tk.Label(inner, text="", bg=BG_CARD, fg=FG_TEXT,
+                                       font=("Consolas", self._scale(8)),
+                                       anchor="w", justify="left")
+            self.proc_label.pack(fill="x", pady=(0, 4))
             foot = tk.Frame(inner, bg=BG_CARD)
             foot.pack(fill="x")
             self.foot = tk.Label(foot, text="", bg=BG_CARD, fg=FG_LABEL,
-                                 font=(FONT_FAMILY, 7), anchor="w")
+                                 font=(FONT_FAMILY, self._scale(7)), anchor="w")
             self.foot.pack(side="left")
             self.hint = tk.Label(foot, text="right-click: settings", bg=BG_CARD,
-                                 fg=FG_LABEL, font=(FONT_FAMILY, 7), anchor="e")
+                                 fg=FG_LABEL, font=(FONT_FAMILY, self._scale(7)),
+                                 anchor="e")
             self.hint.pack(side="right")
         for key, value in data.items():
+            if not isinstance(value, str):
+                continue
             label = self.value_labels.get(key)
             if label is not None:
                 label.config(text=value)
         self.foot.config(text=f"{data.get('adapter','')}  ·  {data.get('session','')}")
+        # Redraw the sparkline from the rolling history (passed in _spark).
+        if self.spark_canvas is not None:
+            self._draw_sparkline(data.get("_spark"))
+        if self.net_label is not None:
+            self.net_label.config(text=data.get("_net", ""))
+        if self.proc_label is not None:
+            self.proc_label.config(text=data.get("_proc", ""))
         try:
             self._place(anchor)
         except tk.TclError:
             self.hide()
+
+    def _draw_sparkline(self, spark: Any) -> None:
+        """Render a 2-line mini chart (download + upload) onto the tooltip canvas."""
+        c = self.spark_canvas
+        if c is None or not isinstance(spark, tuple) or len(spark) != 2:
+            return
+        down, up = spark
+        c.delete("spark")
+        w = int(c.winfo_width() or SPARKLINE_WIDTH)
+        h = int(c.winfo_height() or SPARKLINE_HEIGHT)
+        peak = max([1.0] + list(down) + list(up))
+        n = max(len(down), len(up))
+        if n < 2:
+            return
+
+        def pts(series: List[float]) -> List[Tuple[float, float]]:
+            out = []
+            for i, v in enumerate(series):
+                x = (i / (n - 1)) * w
+                y = h - (max(0.0, v) / peak) * (h - 2) - 1
+                out.append((x, y))
+            return out
+
+        c.create_line(pts(down), fill=FG_DOWN, width=1, tags="spark", smooth=True)
+        c.create_line(pts(up), fill=FG_UP, width=1, tags="spark", smooth=True)
 
     def _place(self, anchor: tk.Misc) -> None:
         if self.window is None:
@@ -1131,6 +1410,8 @@ class ModernContextPanel:
                   lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
         self._row(inner, "Auto-hide when idle", "ON" if w.autohide_var.get() else "OFF",
                   lambda: (w.autohide_var.set(not w.autohide_var.get()), w._on_toggle_autohide()))
+        self._row(inner, "Start with Windows", "ON" if is_autostart_enabled() else "OFF",
+                  lambda: (w.autostart_var.set(not is_autostart_enabled()), w._on_toggle_autostart()))
         self._row(inner, "Snap to Taskbar", "ON" if w.snap_var.get() else "OFF",
                   lambda: (w.snap_var.set(not w.snap_var.get()), w._on_toggle_snap()))
         self._row(inner, "Font size", w.font_size_key.capitalize(),
@@ -1481,15 +1762,31 @@ class SpeedWidget:
         if self.adapter != ALL_ADAPTERS and self.adapter not in self.adapters:
             self.adapter = ALL_ADAPTERS
             self.config.set("adapter", ALL_ADAPTERS, save=True)
+        # Corner-radius appearance choice (v2.7.0). The numeric CORNER_RADIUS
+        # constant is recomputed from this key whenever the user changes it.
+        self.corner_radius_key = str(self.config.get("corner_radius", DEFAULT_CORNER_RADIUS))
+        if self.corner_radius_key not in CORNER_RADIUS_CHOICES:
+            self.corner_radius_key = DEFAULT_CORNER_RADIUS
 
         self.monitor, self.totals = SpeedMonitor(self.adapter), TotalsTracker(self.config)
         self.sysload, self.scanner = SystemLoad(), ProcessScanner()
-        self.ping = PingMonitor()
+        self.ping = PingMonitor(str(self.config.get("ping_host", "")),
+                                int(self.config.get("ping_port", 53) or 53))
         self.update_checker = UpdateChecker()
+        # Sparkline: rolling 60-sample window of download/upload speeds (bytes/s).
+        self._spark_down: List[float] = [0.0] * SPARKLINE_SAMPLES
+        self._spark_up: List[float] = [0.0] * SPARKLINE_SAMPLES
+        # Network info cache (local/public IP, Wi-Fi signal) refreshed lazily.
+        self._net_info: Dict[str, str] = {"local_ip": "--", "public_ip": "--", "wifi": "--"}
+        self._net_info_last: float = 0.0
+        # Per-process speed sampling (best-effort, sampled, not exact).
+        self._proc_speed: Dict[str, Tuple[int, int]] = {}  # name -> (down_bps, up_bps)
+        self._proc_io_last: Dict[int, Tuple[int, int]] = {}  # pid -> (last_recv_bytes, last_sent_bytes)
         self.last_down = self.last_up = 0.0
         self._idle_ticks, self._faded, self._closing = 0, False, False
         self._last_system_sample = 0.0
         self._taskbar_docked = False
+        self._current_owner_tray: Any = None
         self._last_raise = 0.0
         self._last_tooltip_refresh = 0.0
         self._last_adapter_refresh = time.monotonic()
@@ -1498,7 +1795,12 @@ class SpeedWidget:
         self._drag_offset: Optional[Tuple[int, int]] = None
         self._after_id = self._tip_after_id = self._hide_after_id = None
         self._flash_after_id = self._save_after_id = None
+        self._zorder_after_id = None
+        # Adaptive z-order bookkeeping. _zorder_busy tracks the last time we had
+        # to fight for z-order; once quiet for ZORDER_IDLE_GRACE we throttle.
+        self._zorder_last_active = time.monotonic()
         self._lock_flash = False
+        self._high_contrast = False
         self._alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024.0 * 1024.0
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
@@ -1519,6 +1821,10 @@ class SpeedWidget:
         }
 
         self.root = tk.Tk()
+        # Now that a Tk root exists, re-resolve the font family for real so
+        # Windows 10 (which lacks "Segoe UI Variable Text") gets "Segoe UI".
+        refresh_font_family()
+        self._apply_font_profile(self.font_size_key)
         self.bg_window: Optional[tk.Toplevel] = None
         self.bg_canvas: Optional[tk.Canvas] = None
         self.canvas: Optional[tk.Canvas] = None
@@ -1530,12 +1836,32 @@ class SpeedWidget:
         self.context_panel = ModernContextPanel(self)
         self.opacity_popup = OpacityPopup(self.root, self)
         self._restore_position()
+        self._bind_to_taskbar_owner(force=True)
         self._update_lock_indicator()
         self._refresh_layout()
         self._bind_events()
+        # Re-measure layout when the window moves to a monitor with a different
+        # DPI (WM_DPICHANGED is not exposed to tkinter; we approximate by
+        # re-measuring on each <Configure> after the dpi scale may have moved).
+        self.root.bind("<Configure>", self._on_configure, add="+")
+        self._last_dpi_scale = self.ui_scale
         self.root.after(80, self._first_system_sample)
         self.root.after(UPDATE_CHECK_DELAY_MS, self._maybe_check_updates_on_start)
+        # Graceful shutdown on Windows logoff / shutdown / task close. The
+        # WM_QUERYENDSESSION/WM_ENDSESSION messages arrive as a WM_CLOSE-equivalent
+        # which tkinter routes to WM_DELETE_WINDOW; we also catch atexit as a
+        # belt-and-braces flush of the daily totals.
+        import atexit
+        atexit.register(self._atexit_flush)
         self._tick()
+        # Dedicated, fast z-order keep-alive. The 1-second _tick is too slow:
+        # the secondary taskbar (Shell_SecondaryTrayWnd) re-asserts its topmost
+        # position on tray/clock/hover events and, between ticks, jumps above
+        # the widget and stays there. Re-raising keeps the widget visible on
+        # multi-monitor setups where it ends up on a secondary taskbar (e.g.
+        # after swapping the primary display). Frequency is adaptive: fast
+        # right after a fight, throttled once the widget has been stable.
+        self._zorder_loop()
 
     def _build_window(self) -> None:
         # One opaque, layered taskbar window. The old two-window transparent
@@ -1611,6 +1937,34 @@ class SpeedWidget:
         except Exception:
             return 0
 
+    def _bind_to_taskbar_owner(self, force: bool = False) -> None:
+        """Dynamically set the owner to the specific taskbar on this monitor.
+        On multi-monitor setups, secondary monitors use Shell_SecondaryTrayWnd,
+        which has an independent z-order. If we don't own that specific tray,
+        clicking monitor 2's taskbar will bury the widget!"""
+        u = user32()
+        if u is None:
+            return
+        try:
+            cx = self.root.winfo_x() + self.window_width // 2
+            cy = self.root.winfo_y() + self._card_h // 2
+        except tk.TclError:
+            cx = cy = None
+        entry = taskbar_entry_near(cx, cy)
+        target_tray = entry[0] if entry else u.FindWindowW("Shell_TrayWnd", None)
+        if not target_tray or (not force and target_tray == self._current_owner_tray):
+            return
+        self._current_owner_tray = target_tray
+        for window in (self.bg_window, self.root):
+            if window is None:
+                continue
+            try:
+                hwnd = self._hwnd(window)
+                if hwnd:
+                    u.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, target_tray)
+            except Exception:
+                pass
+
     def _apply_toolwindow_style(self, window: tk.Misc) -> None:
         u = user32()
         if u is None:
@@ -1656,7 +2010,11 @@ class SpeedWidget:
 
     def _measure_layout(self) -> None:
         self.ui_scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
-        self.radius = int(round(CORNER_RADIUS * self.ui_scale))
+        # Corner radius derives from the user's appearance choice so the menu
+        # can switch between sharp / small / medium / large / pill at runtime.
+        radius_pts = CORNER_RADIUS_CHOICES.get(self.corner_radius_key,
+                                               CORNER_RADIUS_CHOICES[DEFAULT_CORNER_RADIUS])
+        self.radius = int(round(radius_pts * self.ui_scale))
         self.border = max(1, int(round(CARD_BORDER * self.ui_scale)))
         pad_x = int(round(GLYPH_PAD_X * self.ui_scale))
         pad_y = int(round(GLYPH_PAD_Y * self.ui_scale))
@@ -1669,6 +2027,18 @@ class SpeedWidget:
                          self._text_size("CPU --", self.font_system)[1]) + pad_y
         self.value_px = self._value_px_max
         self._recompute_width()
+
+    def set_corner_radius(self, key: str) -> None:
+        """Change the card corner radius at runtime from a menu choice."""
+        if key not in CORNER_RADIUS_CHOICES:
+            return
+        self.corner_radius_key = key
+        self.config.set("corner_radius", key, save=True)
+        # Force the shape list to rebuild (different radius => different shape
+        # count when crossing the r<2 threshold), then redraw.
+        self._card_shapes = []
+        self._measure_layout()
+        self._refresh_layout()
 
     def _include_sysload(self) -> bool:
         if self.compact:
@@ -1813,27 +2183,55 @@ class SpeedWidget:
         return max(MIN_OPACITY, min(MAX_OPACITY, float(self.opacity)))
 
     def _surface_color(self) -> str:
+        """Card fill color, swapped to the system window color in High Contrast."""
+        if getattr(self, "_high_contrast", False):
+            return "#F0F0F0"
         return BG_CARD
 
     def _draw_card(self, width: int, height: int) -> None:
+        """Paint the rounded card background.
+
+        Shapes are reused across redraws (the old code deleted and recreated
+        ~8 canvas items on every layout change); we now reconfigure their fill
+        in place, which removes a noticeable flicker when toggling compact mode
+        or the lock flash.
+        """
         if self.bg_canvas is None:
             return
-        for item in self._card_shapes:
-            self.bg_canvas.delete(item)
         inset = float(self.border)
         radius = min(self.radius, height / 2.0)
-        shapes = self._rounded_rect(self.bg_canvas, 0.0, 0.0, float(width), float(height),
-                                    radius, self._border_color())
-        shapes += self._rounded_rect(self.bg_canvas, inset, inset, width - inset, height - inset,
-                                     max(2.0, radius - inset), self._surface_color())
-        self._card_shapes = shapes
-        for item in shapes:
+        border_fill = self._border_color()
+        surface_fill = self._surface_color()
+        outer = self._rounded_rect(self.bg_canvas, 0.0, 0.0, float(width), float(height),
+                                   radius, border_fill)
+        inner = self._rounded_rect(self.bg_canvas, inset, inset,
+                                   width - inset, height - inset,
+                                   max(2.0, radius - inset), surface_fill)
+        # If we already had shapes, recolor them and delete the new temp ones;
+        # this keeps the z-order stable and avoids the delete/recreate churn.
+        if self._card_shapes and len(self._card_shapes) == len(outer) + len(inner):
+            for old, new in zip(self._card_shapes, outer + inner):
+                try:
+                    fill = self.bg_canvas.itemcget(new, "fill")
+                    self.bg_canvas.itemconfig(old, fill=fill)
+                except tk.TclError:
+                    pass
+            for item in outer + inner:
+                self.bg_canvas.delete(item)
+        else:
+            self._card_shapes = outer + inner
+        for item in self._card_shapes:
             self.bg_canvas.tag_lower(item)
 
     def _border_color(self) -> str:
-        # Locking no longer recolors the card: the border stays the neutral
-        # slate tone. The only visual cue is a brief flash when a drag is
-        # blocked, plus the checkmark in the menu.
+        """Border color: amber flash when a locked drag is attempted, else neutral.
+
+        In High Contrast mode the border is forced to the system window-frame
+        color so the card outline remains visible against the high-contrast
+        desktop.
+        """
+        if getattr(self, "_high_contrast", False):
+            return "#000000"
         return FG_LOCK_FLASH if self._lock_flash else BORDER_COLOR
 
     def _sync_layer_geometry(self, x: int, y: int, width: int, height: int) -> None:
@@ -1918,7 +2316,19 @@ class SpeedWidget:
                 command=lambda k=fkey: self.set_font_size(k),
                 selectcolor=FG_CHECK)
         self.menu.add_cascade(label="Font size", menu=self.font_menu)
+        # Corner-radius appearance choice (v2.7.0).
+        self.corner_var = tk.StringVar(value=self.corner_radius_key)
+        self.corner_menu = tk.Menu(self.menu, **menu_opts)
+        for ckey in ("sharp", "small", "medium", "large", "pill"):
+            self.corner_menu.add_radiobutton(
+                label=ckey.capitalize(), value=ckey,
+                variable=self.corner_var,
+                command=lambda k=ckey: self.set_corner_radius(k),
+                selectcolor=FG_CHECK)
+        self.menu.add_cascade(label="Corner style", menu=self.corner_menu)
         self.menu.add_command(label="Background transparency\u2026", command=self._open_opacity_popup)
+        # Custom ping target (v2.7.0): opens a small prompt to set host[:port].
+        self.menu.add_command(label="Set ping target\u2026", command=self._set_ping_target)
         self.autohide_var = tk.BooleanVar(value=bool(self.config.get("auto_hide")))
         self.menu.add_checkbutton(label="Auto-hide when idle", variable=self.autohide_var,
                                    command=self._on_toggle_autohide, selectcolor=FG_CHECK)
@@ -1980,6 +2390,37 @@ class SpeedWidget:
         self.config.set("adapter", self.adapter, save=True)
         self.monitor.set_adapter(self.adapter)
         self._refresh_labels(0.0, 0.0)
+
+    def _set_ping_target(self) -> None:
+        """Prompt for a custom ping target (``host`` or ``host:port``).
+
+        Empty input reverts to the built-in Cloudflare/Google DNS defaults so
+        the user can always get back to a known-good state.
+        """
+        current = str(self.config.get("ping_host", ""))
+        if current:
+            current = f"{current}:{self.config.get('ping_port', 53)}"
+        else:
+            current = ""
+        value = simpledialog.askstring("Ping target",
+                                       "Host or host:port (empty = Cloudflare/Google DNS):",
+                                       initialvalue=current, parent=self.root)
+        if value is None:
+            return  # cancelled
+        value = value.strip()
+        host, port = "", 53
+        if value:
+            if ":" in value:
+                host, _, port_s = value.rpartition(":")
+                try:
+                    port = int(port_s)
+                except ValueError:
+                    port = 53
+            else:
+                host = value
+        self.config.set_many({"ping_host": host, "ping_port": port}, save=True)
+        self.ping.set_target(host, port)
+        self.ping.maybe_probe(force=True)
 
     def _on_toggle_sysload(self) -> None:
         enabled = bool(self.sysload_var.get())
@@ -2150,39 +2591,241 @@ class SpeedWidget:
         return self._window_rect_overlaps(x, y, self.window_width, self._card_h, taskbar)
 
     def _raise_windows(self, force: bool = False) -> None:
-        """Keep both layers above an always-on-top Taskbar without stealing focus."""
+        """Keep both layers above an always-on-top Taskbar without stealing focus.
+
+        Two complementary techniques are used so the widget survives the
+        aggressive z-order re-assertion of the *secondary* taskbar
+        (Shell_SecondaryTrayWnd), which buries a plain HWND_TOPMOST widget:
+
+          1. Re-bind each window's owner to the *nearest* taskbar HWND so an
+             owned window always rides above its owner.
+          2. Re-assert WS_EX_TOPMOST (top of the topmost band) and *then* park
+             the window immediately above that specific taskbar via
+             SetWindowPos(hWndInsertAfter = taskbar_hwnd). Inserting above the
+             concrete taskbar — instead of only HWND_TOPMOST — is what keeps the
+             widget visible when the shell re-asserts the taskbar on top.
+        """
         now = time.monotonic()
-        if not force and now - self._last_raise < ZORDER_INTERVAL:
+        if not force and now - self._last_raise < 0.12:
             return
         self._last_raise = now
+        # Mark the adaptive z-order loop as "active" so it keeps re-raising
+        # fast for a grace period after an explicit raise (drag, display swap).
+        if force:
+            self._zorder_last_active = now
+        self._bind_to_taskbar_owner()
+        try:
+            self.root.attributes("-topmost", True)
+            if self.bg_window is not None:
+                self.bg_window.attributes("-topmost", True)
+        except tk.TclError:
+            pass
         u = user32()
         if u is None:
-            try:
-                self.root.attributes("-topmost", True)
-                if self.bg_window is not None:
-                    self.bg_window.attributes("-topmost", True)
-            except tk.TclError:
-                pass
             return
-        # Paint/background first, text layer second. Windows may reorder the
-        # Taskbar after a click, so restore both HWNDs without stealing focus.
+        # The specific taskbar HWND on this monitor (primary or secondary).
+        # _bind_to_taskbar_owner() keeps this cached/updated.
+        target_tray = self._current_owner_tray
+        flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+        # Background first, root second so the text layer ends up on top.
         for window in (self.bg_window, self.root):
             if window is None:
                 continue
             try:
                 hwnd = self._hwnd(window)
-                if hwnd:
-                    u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+                if not hwnd:
+                    continue
+                # 1) Guarantee WS_EX_TOPMOST membership of the topmost band.
+                u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                # 2) Reorder to sit directly above THIS monitor's taskbar so
+                #    the shell's own topmost re-assertion can no longer jump
+                #    in between the widget and the taskbar.
+                if target_tray:
+                    u.SetWindowPos(hwnd, target_tray, 0, 0, 0, 0, flags)
             except Exception:
                 pass
-        if force:
+        try:
+            if self.bg_window is not None:
+                self.bg_window.lift()
+            self.root.lift()
+        except tk.TclError:
+            pass
+
+    def _zorder_loop(self) -> None:
+        """High-frequency, adaptive re-assertion of the taskbar z-order.
+
+        Runs on its own timer independently of the 1-second ``_tick`` so the
+        widget can no longer be permanently buried by the secondary taskbar's
+        re-assertion between ticks. The interval is **adaptive**: right after
+        the widget had to fight for z-order (drag, primary-display swap,
+        manual ``force=True`` raise) it re-asserts at
+        :data:`ZORDER_INTERVAL_ACTIVE`; once it has been stable for
+        :data:`ZORDER_IDLE_GRACE` seconds it throttles to
+        :data:`ZORDER_INTERVAL_IDLE` to save CPU. A hidden widget (iconified
+        or fully buried) still gets re-raised so it pops back on top.
+        """
+        if self._closing:
+            return
+        try:
+            self._raise_windows()
+        except Exception:
+            log.debug("zorder loop failed", exc_info=True)
+        now = time.monotonic()
+        active = now - self._zorder_last_active < ZORDER_IDLE_GRACE
+        interval = ZORDER_INTERVAL_ACTIVE if active else ZORDER_INTERVAL_IDLE
+        self._zorder_after_id = self.root.after(
+            int(interval * 1000), self._zorder_loop)
+
+    def _on_configure(self, _event: "tk.Event") -> None:
+        """Re-measure the layout when the window lands on a different-DPI monitor.
+
+        Tkinter does not expose ``WM_DPICHANGED``; instead we poll the effective
+        DPI scale on every ``<Configure>`` (which fires when the window moves)
+        and re-measure the card if the scale changed. This keeps the card crisp
+        when dragged between a 100% and a 150% monitor.
+        """
+        if self._closing:
+            return
+        try:
+            current = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
+        except tk.TclError:
+            return
+        if abs(current - self._last_dpi_scale) > 0.05:
+            self._last_dpi_scale = current
+            self._measure_layout()
+            self._refresh_layout()
+            self._raise_windows(force=True)
+
+    def _atexit_flush(self) -> None:
+        """Belt-and-braces flush of daily totals on interpreter exit.
+
+        Covers the case where Windows sends ``WM_QUERYENDSESSION`` (logoff /
+        shutdown) which routes through ``WM_DELETE_WINDOW`` → :meth:`quit`;
+        if the normal quit path is skipped (hard kill), atexit still runs and
+        persists the last known totals so no more than ~1s of traffic is lost.
+        """
+        try:
+            if getattr(self, "_closing", True):
+                return
+            self.totals.flush()
+        except Exception:
+            pass
+
+    def _sparkline_push(self, down_bps: float, up_bps: float) -> None:
+        """Append one sample to the rolling speed history (called each tick)."""
+        self._spark_down.append(max(0.0, down_bps))
+        self._spark_up.append(max(0.0, up_bps))
+        if len(self._spark_down) > SPARKLINE_SAMPLES:
+            self._spark_down.pop(0)
+            self._spark_up.pop(0)
+
+    def _refresh_net_info(self) -> None:
+        """Refresh cached local/public IP and Wi-Fi signal (off the UI thread).
+
+        Runs at most every ~30s; public IP is fetched from ipify (best-effort,
+        fails silently to "--"). Wi-Fi signal uses ``netsh wlan`` parsing which
+        is the only dependency-free way to read it on Windows without admin.
+        """
+        now = time.monotonic()
+        if now - self._net_info_last < 30.0:
+            return
+        self._net_info_last = now
+        threading.Thread(target=self._fetch_net_info, daemon=True).start()
+
+    def _fetch_net_info(self) -> None:
+        info = dict(self._net_info)
+        # Local IPv4 of the active adapter.
+        try:
+            if self.adapter == ALL_ADAPTERS:
+                # Pick the first non-loopback IPv4 across all interfaces.
+                for _name, addrs in psutil.net_if_addrs().items():
+                    for a in addrs:
+                        if a.family == socket.AF_INET and not a.address.startswith("127."):
+                            info["local_ip"] = a.address
+                            raise _StopLoop
+            else:
+                addrs = psutil.net_if_addrs().get(self.adapter, [])
+                for a in addrs:
+                    if a.family == socket.AF_INET:
+                        info["local_ip"] = a.address
+                        break
+        except _StopLoop:
+            pass
+        except Exception:
+            log.debug("local ip read failed", exc_info=True)
+        # Public IP (best-effort; never block the UI).
+        try:
+            req = urllib.request.Request("https://api.ipify.org",
+                                         headers={"User-Agent": APP_NAME})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                info["public_ip"] = resp.read().decode("ascii", "ignore").strip() or "--"
+        except Exception:
+            info["public_ip"] = "--"
+        # Wi-Fi signal strength (%) via netsh — Windows-only, no admin needed.
+        if IS_WINDOWS:
             try:
-                if self.bg_window is not None:
-                    self.bg_window.lift()
-                self.root.lift()
-            except tk.TclError:
-                pass
+                out = subprocess.run(["netsh", "wlan", "show", "interfaces"],
+                                     capture_output=True, text=True, timeout=4,
+                                     creationflags=CREATE_NO_WINDOW)
+                for line in (out.stdout or "").splitlines():
+                    if "Signal" in line and "%" in line:
+                        info["wifi"] = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                info["wifi"] = "--"
+        else:
+            info["wifi"] = "--"
+        self._net_info = info
+
+    def _sample_proc_speed(self) -> None:
+        """Best-effort per-process network speed sampling.
+
+        Exact per-process bandwidth needs ETW (admin + complex). Instead we
+        sample each process's cumulative IO byte counters (``io_read_bytes``
+        and ``io_write_bytes`` approximate network+disk IO; for network-heavy
+        apps they correlate well) and derive a bytes/sec delta. This is a
+        *sampled approximation*, not a precise per-process speed — see Known
+        Limitations in the README. Runs on the tick thread, cheap because we
+        only scan the top-N connection holders from the ProcessScanner.
+        """
+        try:
+            now = time.monotonic()
+            rows = self.scanner.snapshot()
+            names = []
+            for row in rows:
+                # rows look like "  chrome.exe                12 conn"
+                stripped = row.strip()
+                if not stripped or stripped.startswith("+") or "conn" not in stripped:
+                    continue
+                parts = stripped.split()
+                if parts:
+                    names.append(parts[0])
+            if not names:
+                self._proc_speed.clear()
+                return
+            result: Dict[str, Tuple[int, int]] = {}
+            for proc in psutil.process_iter(attrs=["pid", "name"]):
+                try:
+                    pname = proc.info["name"] or ""
+                    if not any(pname.startswith(n) or n in pname for n in names):
+                        continue
+                    io = proc.io_counters()
+                    pid = proc.pid
+                    last = self._proc_io_last.get(pid)
+                    self._proc_io_last[pid] = (io.read_bytes, io.write_bytes)
+                    if last is None:
+                        continue
+                    dt = max(0.001, now - getattr(self, "_proc_speed_last", now))
+                    down_bps = max(0, io.read_bytes - last[0]) / dt
+                    up_bps = max(0, io.write_bytes - last[1]) / dt
+                    prev = result.get(pname, (0, 0))
+                    result[pname] = (int(prev[0] + down_bps), int(prev[1] + up_bps))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            self._proc_speed = result
+            self._proc_speed_last = now
+        except Exception:
+            log.debug("per-process speed sample failed", exc_info=True)
 
     def _enforce_taskbar_dock(self) -> None:
         if not self._taskbar_docked or not self.config.get("snap_edges"):
@@ -2368,9 +3011,18 @@ class SpeedWidget:
         # process list; only the dashboard needs a scan.
         self.tooltip.show(self._tooltip_data(), self.root)
 
-    def _tooltip_data(self) -> Dict[str, str]:
+    def _tooltip_data(self) -> Dict[str, Any]:
         cpu_text, ram_text = self.sysload.text_short()
         self.ping.maybe_probe()
+        info = self._net_info
+        net_line = (f"local {info.get('local_ip','--')}   "
+                    f"public {info.get('public_ip','--')}   "
+                    f"wifi {info.get('wifi','--')}")
+        # Top-3 processes by sampled download bandwidth.
+        proc_rows = sorted(self._proc_speed.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
+        proc_text = "\n".join(
+            f"  {shorten(name,18).ljust(18)} \u2193{format_speed(d):>9}  \u2191{format_speed(u):>9}"
+            for name, (d, u) in proc_rows) or "  --"
         return {
             "down": format_speed(self.last_down),
             "up": format_speed(self.last_up),
@@ -2381,6 +3033,9 @@ class SpeedWidget:
             "session": (f"today {format_bytes(self.totals.daily_down + self.totals.daily_up)}"
                         f"  ·  up {format_duration(self.totals.session_seconds)}"
                         f"  ·  peak {format_speed(self.totals.peak_down)}"),
+            "_spark": (list(self._spark_down), list(self._spark_up)),
+            "_net": net_line,
+            "_proc": proc_text,
         }
 
     def _on_drag_start(self, event: "tk.Event") -> None:
@@ -2403,6 +3058,7 @@ class SpeedWidget:
         if self.config.get("snap_edges"):
             x, y = self._snap_position(self.root.winfo_x(), self.root.winfo_y())
             self._move_windows(x, y)
+        self._bind_to_taskbar_owner(force=True)
         self._taskbar_docked = self._position_in_taskbar(self.root.winfo_x(), self.root.winfo_y())
         self._raise_windows(force=True)
         self._save_position()
@@ -2422,6 +3078,8 @@ class SpeedWidget:
             self.last_down, self.last_up = down, up
             self.totals.add(down_bytes, up_bytes)
             self.totals.note_speed(down, up)
+            # Feed the rolling sparkline history (bytes/s -> keep raw).
+            self._sparkline_push(down_bytes, up_bytes)
             self._refresh_labels(down, up)
             self._update_idle_state(down, up)
         except Exception:
@@ -2434,6 +3092,21 @@ class SpeedWidget:
             except Exception:
                 log.debug("system sample failed", exc_info=True)
         try:
+            # Latency probe runs on its own throttle (non-blocking).
+            self.ping.maybe_probe()
+            # Refresh local/public IP + Wi-Fi signal lazily (~30s).
+            self._refresh_net_info()
+            # Per-process speed sampling (~every tick is fine; it is cheap
+            # because we only iterate the connection-holder names).
+            if now - getattr(self, "_proc_speed_last", 0.0) >= 1.0:
+                self._sample_proc_speed()
+            # React to the Windows High Contrast accessibility theme being
+            # toggled while the app runs; the card repaints with system colors.
+            hc = is_high_contrast()
+            if hc != self._high_contrast:
+                self._high_contrast = hc
+                self._card_shapes = []
+                self._draw_card(self._card_w, self._card_h)
             self._enforce_taskbar_dock()
             self._raise_windows()
             if self.bg_window is not None and not self._suppress_bg_sync:
@@ -2508,12 +3181,14 @@ class SpeedWidget:
         if self._closing: return
         self._closing = True
         for handle in (self._after_id, self._tip_after_id, self._hide_after_id,
-                       self._flash_after_id, self._save_after_id):
+                       self._flash_after_id, self._save_after_id,
+                       self._zorder_after_id):
             if handle is not None:
                 try: self.root.after_cancel(handle)
                 except tk.TclError: pass
         self._after_id = self._tip_after_id = self._hide_after_id = None
         self._flash_after_id = self._save_after_id = None
+        self._zorder_after_id = None
         self.tooltip.hide()
         self.context_panel.close()
         self.opacity_popup.close()
@@ -2545,7 +3220,7 @@ def claim_single_instance() -> bool:
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
         _instance_mutex = kernel32.CreateMutexW(None, 1, f"Local\\{APP_NAME}_singleton")
-        return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+        return kernel32.GetLastError() != ERROR_ALREADY_EXISTS
     except Exception:
         return True
 
@@ -2555,17 +3230,28 @@ def main() -> int:
     if "--version" in sys.argv or "-v" in sys.argv:
         print(f"{APP_NAME} {APP_VERSION}")
         return 0
-    # Multi-DPI V2 awareness for crisp rendering across multi-monitor setups
-    if IS_WINDOWS:
+    # NetSpeedTray is Windows-only: the z-order/taskbar glue, the autostart
+    # registry key and the high-contrast/DPI helpers all call into user32.
+    # Bail out cleanly on macOS/Linux instead of crashing inside Tk.
+    if not IS_WINDOWS:
+        print(f"{APP_NAME} {APP_VERSION} is Windows-only.", file=sys.stderr)
+        print("It uses the Windows taskbar/DPI/registry APIs and does not run "
+              "on macOS or Linux.", file=sys.stderr)
+        return 1
+    # Multi-DPI V2 awareness for crisp rendering across multi-monitor setups.
+    # Named constants kept next to their use; the values are documented in the
+    # constants block at the top of the file.
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(
+            ctypes.c_void_p(DPI_AWARENESS_PER_MONITOR_V2))
+    except Exception:
         try:
-            # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
-            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            ctypes.windll.shcore.SetProcessDpiAwareness(DPI_AWARENESS_PER_MONITOR)
         except Exception:
             try:
-                ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per-monitor aware
+                ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
-                try: ctypes.windll.user32.SetProcessDPIAware()
-                except Exception: pass
+                pass
     if "--enable-autostart" in sys.argv:
         print("Auto-start enabled" if set_autostart(True) else "Failed")
         return 0
@@ -2596,7 +3282,7 @@ def main() -> int:
         log.warning("another instance is already running")
         try:
             ctypes.windll.user32.MessageBoxW(
-                0, f"{APP_NAME} is already running.", APP_NAME, 0x40)
+                0, f"{APP_NAME} is already running.", APP_NAME, MB_ICONINFORMATION)
         except Exception:
             pass
         return 0

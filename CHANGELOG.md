@@ -4,6 +4,89 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - Unreleased
+
+A focus release on richer at-a-glance information, multi-monitor robustness, and
+accessibility. The backend is now a small `src/net_speed/` package with a `pytest`
+suite; the entry point `src/netspeedtray.py` holds the UI only.
+
+### Added
+- **Speed sparkline** — a mini line chart of recent download/upload speed is drawn inside
+  the hover tooltip, so trends are visible at a glance alongside the current value.
+- **Custom ping target** — a new config option lets you pick the `host:port` used for the
+  latency measurement shown in the tooltip (default is a well-known HTTPS endpoint).
+- **Local & public IP** — the tooltip now reports both the LAN address and the
+  public-facing IP (looked up once on start-up against a public echo service and
+  refreshed lazily).
+- **Wi-Fi signal strength badge** — when the active adapter is wireless, a small badge
+  in the tooltip reports the current signal quality (0–100%).
+- **Per-process network speed** — a new per-app dashboard lists every process with live
+  download/upload speed sampled from `psutil`'s per-IO counters. (Needs administrator
+  rights to see other users' / SYSTEM processes.)
+- **High-contrast mode** — Windows High Contrast / accessibility themes are detected and
+  the card recolours itself from the system palette so it stays legible; the dark text
+  shadow is disabled in this mode by design.
+- **Adaptive corner radius** — an appearance option lets the card's rounded corners scale
+  with system DPI instead of a fixed pixel value.
+- **Font auto-fallback** — on older Windows builds where the default UI font is missing,
+  the app falls back to a nearby installed font instead of throwing.
+- **Graceful shutdown on logoff** — the app traps the Windows logoff/sign-out/shutdown
+  messages, flushes its config and exits cleanly, so no settings are lost and no zombie
+  process is left behind.
+- **Taskbar-cache module-level caching** — repeated Win32 taskbar/enumeration calls are
+  memoised at module level for the duration of a tick, cutting redundant work on the
+  refresh path.
+- **Adaptive z-order re-assertion** — the card's top-most z-order is re-asserted on an
+  adaptive schedule (faster right after a display change, slower when stable) instead of
+  a fixed cadence.
+- **Per-app network dashboard speed column** — the dashboard gained a live
+  download/upload speed column alongside the existing connection count.
+- **`pytest` test suite** — a new `tests/` directory covers version parsing (including
+  pre-release tags), config migration, unit formatting, the per-process speed sampler
+  and the sparkline ring buffer. Windows-only Win32 helpers are skipped on non-Windows
+  runners.
+
+### Changed
+- **`APP_VERSION` is now read from a `VERSION` file** at the repo root instead of being
+  hard-coded in `src/netspeedtray.py`. The PyInstaller build copies it into the bundle,
+  so the running `.exe` and the source tree can never drift apart.
+- **Win32 magic numbers converted to named constants** — every bare `0x…` / integer
+  passed to `ctypes.windll.*` now lives in `src/net_speed/constants.py` with a comment,
+  making the Win32 glue readable and greppable.
+- **`UpdateChecker` no longer fabricates a fake "latest release"** when GitHub returns no
+  newer tag — it now reports "no newer release found" instead of synthesising a payload
+  equal to the current version.
+- **`compare_versions` now parses pre-release tags** (`-alpha`, `-beta`, `-rc.1`) per
+  SemVer, so `2.7.0-rc.1` correctly compares as older than `2.7.0`.
+- **`install_update` uses rename-and-retry instead of `del`** — the updater writes the
+  new binary to a temp path and renames it over the running exe, retrying briefly if the
+  file is still locked, which is more robust than the previous `copy` + `del` sequence.
+- **`Config` supports batch writes** — a context manager / `begin()` … `commit()` pair
+  lets the refresh path update several keys and persist them in a single atomic write,
+  reducing config-file churn.
+- **Tooltip fonts scale with system DPI** — the tooltip text now picks up the same DPI
+  scaling as the main card, so it does not look tiny on a 4K / 150% display.
+- **Modularised into a `net_speed/` package** — the monolithic `netspeedtray.py` was
+  split into `src/net_speed/{constants,win32,utils,config,monitors,updates}.py` with
+  `src/netspeedtray.py` as the thin UI-only entry point. The package has no UI
+  dependency, which is what makes the new test suite possible.
+
+### Fixed
+- **Widget hidden behind a secondary taskbar when the primary display is swapped** —
+  a z-order keep-alive now re-asserts `HWND_TOPMOST` after display configuration changes,
+  so the card no longer slips under the taskbar on the newly-primary monitor.
+- **Multi-monitor DPI change re-measurement** — when a monitor's DPI scaling changes
+  (or the card is dragged between monitors at different DPIs), the card width and font
+  size are re-measured instead of staying at the launch-time values, so the layout no
+  longer clips or stretches.
+- **Config corruption on clock rollback** — `Config` writes are now guarded so a system
+  clock rollback (NTP correction, time-zone change) can no longer produce a
+  half-overwritten `config.json`. The previous content is kept until the new one is fully
+  serialised, then atomically swapped.
+- **Install update race when the exe is still locked** — the swap step now retries a few
+  times with back-off and falls back to a rename-on-restart if the running binary is
+  still locked, instead of failing outright.
+
 ## [1.1.0] - 2026-09-17
 
 ### Added
