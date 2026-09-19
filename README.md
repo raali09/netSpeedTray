@@ -127,12 +127,19 @@ outline so they are always legible.
 ```bash
 py src/netspeedtray.py --enable-autostart    # start with Windows
 py src/netspeedtray.py --disable-autostart
+py src/netspeedtray.py --check-startup       # diagnose why Windows may skip launch
 py src/netspeedtray.py --reset-config        # remove the saved settings
 py src/netspeedtray.py --check-updates       # print latest vs. current version
 ```
 
 Windows Defender / SmartScreen may warn about auto-start entries; nothing is installed
 outside of `%APPDATA%\NetSpeedTray\config.json`.
+
+Auto-start reliability: the entry is written to `HKCU\...\CurrentVersion\Run` and
+re-asserted on every launch. If the exe is moved, or Windows (Task Manager → Startup
+apps / Settings → Apps → Startup) disables the entry, NetSpeedTray detects and repairs
+it automatically. `--check-startup` reports exactly what Windows will do at logon
+(and in the packaged windowed exe the report appears as a message box).
 
 ## In-app updates
 

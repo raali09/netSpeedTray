@@ -233,6 +233,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "check_updates_on_start": True,
 }
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+# Windows keeps the Task Manager / Settings "Startup apps" toggle in a
+# separate key. An entry can exist in RUN_KEY and still be silently skipped
+# at logon when it is flagged as disabled here (odd first byte of a 12-byte
+# REG_BINARY value).
+STARTUP_APPROVED_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+)
 LOG_PATH = os.path.join(CONFIG_DIR, "netspeedtray.log")
 
 log = logging.getLogger(APP_NAME)
@@ -793,25 +800,89 @@ def autostart_command() -> str:
     return f'"{exe}" "{os.path.abspath(__file__)}"'
 
 
-def is_autostart_enabled() -> bool:
+def _read_run_value() -> Optional[str]:
+    """Return the registered launch command, or None when not set."""
+    if winreg is None:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            command, _type = winreg.QueryValueEx(key, APP_NAME)
+        return str(command) if command else ""
+    except (OSError, FileNotFoundError, TypeError):
+        return None
+
+
+def _parse_command_path(command: str) -> Optional[str]:
+    """Extract the executable path from a Run value (quoted or bare)."""
+    command = (command or "").strip()
+    if not command:
+        return None
+    if command.startswith('"'):
+        end = command.find('"', 1)
+        return command[1:end] if end > 1 else command[1:]
+    return command.split(None, 1)[0]
+
+
+def _startup_approved_disabled() -> bool:
+    """True when Windows flags the app as disabled in Task Manager/Settings.
+
+    Windows tracks the per-user "Startup apps" toggle as a 12-byte
+    REG_BINARY under StartupApproved\\Run. When the first byte is odd the
+    entry is disabled: the Run value still exists, but Windows silently
+    skips launching it at logon — exactly the "toggle says ON but the app
+    never starts" case.
+    """
     if winreg is None:
         return False
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, APP_NAME)
-        return True
-    except (OSError, FileNotFoundError):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_KEY) as key:
+            data, _type = winreg.QueryValueEx(key, APP_NAME)
+    except (OSError, FileNotFoundError, TypeError):
         return False
+    try:
+        return bool(data) and bool(data[0] & 1)
+    except (TypeError, IndexError):
+        return False
+
+
+def _clear_startup_approved_block() -> None:
+    """Remove the 'disabled' flag so Windows launches the entry again.
+
+    Deleting the value resets the Task Manager toggle to its default
+    (enabled) state; a missing value is not an error.
+    """
+    if winreg is None:
+        return
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, APP_NAME)
+    except (OSError, FileNotFoundError):
+        pass
+
+
+def is_autostart_enabled() -> bool:
+    """True only when the Run entry exists AND Windows has not disabled it."""
+    command = _read_run_value()
+    if command is None or not command.strip():
+        return False
+    return not _startup_approved_disabled()
 
 
 def set_autostart(enabled: bool) -> bool:
     if winreg is None:
         return False
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            if enabled:
+        if enabled:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
-            else:
+            # A Run value alone is not enough when Task Manager/Settings has
+            # the entry switched off: clear that flag so logon launch works.
+            _clear_startup_approved_block()
+        else:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as key:
                 try:
                     winreg.DeleteValue(key, APP_NAME)
                 except FileNotFoundError:
@@ -819,6 +890,83 @@ def set_autostart(enabled: bool) -> bool:
         return True
     except OSError:
         return False
+
+
+def ensure_autostart_healthy() -> None:
+    """Self-repair a broken autostart entry whose intent is ON.
+
+    Covers the two silent-failure cases that show no Windows error:
+      * the exe/script moved after enabling, so the Run value points to a
+        file that no longer exists (rewrite with the current path);
+      * Windows (or the user via Task Manager) flagged the entry disabled
+        while the in-app toggle says ON (clear the flag again).
+    Called once at every app start, before the widget is created.
+    """
+    if winreg is None or not IS_WINDOWS:
+        return
+    command = _read_run_value()
+    if command is None:
+        return  # Autostart is off by intent; nothing to repair.
+    target = _parse_command_path(command)
+    if not command.strip() or not (target and os.path.exists(target)):
+        log.warning("startup: registry entry is broken (points to %r); re-registering", target)
+        set_autostart(True)
+        return
+    if _startup_approved_disabled():
+        log.warning("startup: Windows had %s disabled in Startup apps; re-enabling", APP_NAME)
+        _clear_startup_approved_block()
+
+
+def startup_diagnostics_report() -> str:
+    """Human-readable report of why Windows may skip launching the app."""
+    lines = [f"{APP_NAME} {APP_VERSION} - startup diagnostics",
+             f"exe: {sys.executable}",
+             f"frozen build: {bool(getattr(sys, 'frozen', False))}",
+             f"command to register: {autostart_command()}"]
+    if winreg is None:
+        lines.append("winreg unavailable on this platform")
+        return "\n".join(lines)
+    command = _read_run_value()
+    if command is None or not command.strip():
+        lines.append("Run value: NOT SET (autostart is OFF)")
+        lines.append("fix: enable 'Start with Windows' in the tray menu,")
+        lines.append("     or run: NetSpeedTray.exe --enable-autostart")
+        return "\n".join(lines)
+    target = _parse_command_path(command)
+    lines.append(f"Run value: {command}")
+    lines.append(f"target path: {target}")
+    lines.append(f"target exists: {bool(target and os.path.exists(target))}")
+    if target and not os.path.exists(target):
+        lines.append("PROBLEM: the registered file no longer exists")
+        lines.append("       (the exe was moved/renamed after enabling).")
+        lines.append("fix: run NetSpeedTray.exe --enable-autostart")
+    if _startup_approved_disabled():
+        lines.append("PROBLEM: Windows has this entry DISABLED in Startup apps")
+        lines.append("       (Task Manager > Startup apps / Settings > Apps > Startup).")
+        lines.append("fix: run NetSpeedTray.exe --enable-autostart")
+    if not _startup_approved_disabled() and target and os.path.exists(target):
+        lines.append("Registry looks healthy. If the app still does not start:")
+        lines.append(" - check antivirus/Windows Security 'Protection history'")
+        lines.append(" - check the log: %APPDATA%\\NetSpeedTray\\netspeedtray.log")
+    return "\n".join(lines)
+
+
+def _cli_feedback(message: str) -> None:
+    """Print CLI results; also show a message box for windowed exe builds."""
+    if sys.stdout:
+        print(message)
+    if getattr(sys, "frozen", False):
+        try:
+            ctypes.windll.user32.MessageBoxW(0, message, APP_NAME, MB_ICONINFORMATION)
+        except Exception:
+            pass
+
+
+def print_startup_diagnostics() -> int:
+    """Show the startup report; message box for windowed (no console) builds."""
+    report = startup_diagnostics_report()
+    _cli_feedback(report)
+    return 0 if "PROBLEM" not in report else 2
 
 
 class UpdateChecker:
@@ -3253,11 +3401,13 @@ def main() -> int:
             except Exception:
                 pass
     if "--enable-autostart" in sys.argv:
-        print("Auto-start enabled" if set_autostart(True) else "Failed")
+        _cli_feedback("Auto-start enabled" if set_autostart(True) else "Failed")
         return 0
     if "--disable-autostart" in sys.argv:
-        print("Auto-start disabled" if set_autostart(False) else "Failed")
+        _cli_feedback("Auto-start disabled" if set_autostart(False) else "Failed")
         return 0
+    if "--check-startup" in sys.argv:
+        return print_startup_diagnostics()
     if "--reset-config" in sys.argv:
         try:
             os.remove(CONFIG_PATH)
@@ -3286,6 +3436,7 @@ def main() -> int:
         except Exception:
             pass
         return 0
+    ensure_autostart_healthy()
     try:
         SpeedWidget().run()
     except Exception:

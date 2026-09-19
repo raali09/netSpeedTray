@@ -72,6 +72,26 @@ suite; the entry point `src/netspeedtray.py` holds the UI only.
   dependency, which is what makes the new test suite possible.
 
 ### Fixed
+- **"Start with Windows" showed ON but the app never launched after reboot** —
+  the autostart state is now checked against *both* registry keys Windows uses:
+  `HKCU\...\CurrentVersion\Run` (the launch command) and the `StartupApproved`
+  flag Task Manager / Settings > Apps > Startup writes. When the entry is
+  flagged disabled there, Windows silently skips it at logon even though the
+  Run value still exists; enabling autostart now clears that flag, and the
+  tray-menu toggle reflects the *effective* state instead of just "value
+  exists".
+- **Stale autostart path after moving/renaming the exe** — the Run value used
+  to keep the path captured when the toggle was first switched on, so moving
+  the app to another folder left Windows launching a file that no longer
+  existed (with no error shown). A new `ensure_autostart_healthy()` pass runs
+  at every app start and re-registers the entry with the current path when the
+  recorded target is missing.
+- **Added `--check-startup`** — a diagnostic command that prints (or shows in
+  a message box for the windowed exe build) the registered command, whether
+  the target file exists and whether Windows has the entry disabled, with the
+  exact fix for each problem. `--enable-autostart` now doubles as the repair
+  command: it rewrites the Run value *and* clears any Task Manager disable
+  flag.
 - **Widget hidden behind a secondary taskbar when the primary display is swapped** —
   a z-order keep-alive now re-asserts `HWND_TOPMOST` after display configuration changes,
   so the card no longer slips under the taskbar on the newly-primary monitor.
