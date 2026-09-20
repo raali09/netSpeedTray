@@ -13,6 +13,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import simpledialog
+import traceback
 import urllib.error
 import urllib.request
 import webbrowser
@@ -253,7 +254,11 @@ def setup_logging() -> None:
     """Quiet by default; NETSPEEDTRAY_DEBUG=1 writes a rotating-ish log next to the config."""
     if log.handlers:
         return
-    log.setLevel(logging.DEBUG if os.environ.get("NETSPEEDTRAY_DEBUG") else logging.WARNING)
+    # INFO by default: the "startup: launched" line written at every start
+    # is the key diagnostic for "did Windows actually run me after reboot?"
+    # (no new line after a reboot = Windows never launched the app).
+    # Verbose debug output stays opt-in via NETSPEEDTRAY_DEBUG=1.
+    log.setLevel(logging.DEBUG if os.environ.get("NETSPEEDTRAY_DEBUG") else logging.INFO)
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 512 * 1024:
@@ -917,6 +922,16 @@ def ensure_autostart_healthy() -> None:
         _clear_startup_approved_block()
 
 
+def _last_launch_line() -> str:
+    """Return the last 'startup: launched' line recorded in the log."""
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            launches = [line.strip() for line in fh if "startup: launched" in line]
+    except OSError:
+        return ""
+    return launches[-1] if launches else ""
+
+
 def startup_diagnostics_report() -> str:
     """Human-readable report of why Windows may skip launching the app."""
     lines = [f"{APP_NAME} {APP_VERSION} - startup diagnostics",
@@ -944,10 +959,15 @@ def startup_diagnostics_report() -> str:
         lines.append("PROBLEM: Windows has this entry DISABLED in Startup apps")
         lines.append("       (Task Manager > Startup apps / Settings > Apps > Startup).")
         lines.append("fix: run NetSpeedTray.exe --enable-autostart")
+    last = _last_launch_line()
+    lines.append(f"log file: {LOG_PATH}")
+    lines.append(f"last recorded launch: {last or 'none yet'}")
     if not _startup_approved_disabled() and target and os.path.exists(target):
-        lines.append("Registry looks healthy. If the app still does not start:")
-        lines.append(" - check antivirus/Windows Security 'Protection history'")
-        lines.append(" - check the log: %APPDATA%\\NetSpeedTray\\netspeedtray.log")
+        lines.append("Registry looks healthy. If the app still does not start after reboot:")
+        lines.append(" - reboot, then re-check the log above: a fresh 'startup: launched'")
+        lines.append("   line means the app ran and died later (see the log tail);")
+        lines.append("   no new line means Windows never launched it.")
+        lines.append(" - then check antivirus/Windows Security 'Protection history'.")
     return "\n".join(lines)
 
 
@@ -3033,6 +3053,7 @@ class SpeedWidget:
         self._apply_geometry(x, y)
         self._taskbar_docked = self._position_in_taskbar(x, y)
         self._raise_windows(force=True)
+        log.info("startup: widget shown at (%s, %s)", x, y)
 
     def _on_screen(self, x: int, y: int) -> bool:
         bounds = enum_monitor_bounds()
@@ -3375,6 +3396,11 @@ def claim_single_instance() -> bool:
 
 def main() -> int:
     setup_logging()
+    # Sentinel line: after a reboot, a fresh "startup: launched" entry here
+    # proves Windows actually ran the app (any failure happened later);
+    # its absence means Windows never launched it (registry/antivirus).
+    log.info("startup: launched exe=%s argv=%r frozen=%s",
+             sys.executable, sys.argv, bool(getattr(sys, "frozen", False)))
     if "--version" in sys.argv or "-v" in sys.argv:
         print(f"{APP_NAME} {APP_VERSION}")
         return 0
@@ -3436,12 +3462,22 @@ def main() -> int:
         except Exception:
             pass
         return 0
+    # Repair a "says ON but Windows skips it" autostart entry before the UI
+    # comes up (stale exe path after a move, or a Task Manager disable flag).
     ensure_autostart_healthy()
     try:
         SpeedWidget().run()
     except Exception:
+        # Windowed exe builds have no console: without this the app would die
+        # invisibly at logon. Log it AND show it so the cause is actionable.
         log.exception("fatal error")
-        raise
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0, f"{APP_NAME} failed to start:\n\n{traceback.format_exc()[:800]}",
+                APP_NAME, MB_ICONERROR)
+        except Exception:
+            pass
+        return 1
     return 0
 
 

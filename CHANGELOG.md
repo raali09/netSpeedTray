@@ -92,6 +92,14 @@ suite; the entry point `src/netspeedtray.py` holds the UI only.
   exact fix for each problem. `--enable-autostart` now doubles as the repair
   command: it rewrites the Run value *and* clears any Task Manager disable
   flag.
+- **Startup crash visibility + launch evidence** — every launch now writes a
+  `startup: launched` line (with exe path and timestamp) to
+  `%APPDATA%\NetSpeedTray\netspeedtray.log`, the default log level is INFO
+  (debug stays opt-in via `NETSPEEDTRAY_DEBUG=1`), the widget logs where it
+  was shown, and fatal start-up errors now pop a message box in windowed exe
+  builds instead of dying invisibly at logon. `--check-startup` also reports
+  the last recorded launch, so "Windows never ran the app" (antivirus block)
+  is cleanly distinguishable from "ran and crashed later".
 - **Widget hidden behind a secondary taskbar when the primary display is swapped** —
   a z-order keep-alive now re-asserts `HWND_TOPMOST` after display configuration changes,
   so the card no longer slips under the taskbar on the newly-primary monitor.
