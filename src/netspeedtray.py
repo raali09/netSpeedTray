@@ -1152,7 +1152,7 @@ def install_update(temp_exe: str) -> bool:
 
 
 class PingMonitor:
-    """Non-blocking, cached latency probe using a fast TCP handshake.
+    """Non-blocking, cached latency and jitter probe using a fast TCP handshake.
 
     Uses a TCP ``connect()`` round-trip rather than raw ICMP because ICMP needs
     administrator privileges on Windows. The connect time is a good proxy for
@@ -1164,8 +1164,10 @@ class PingMonitor:
 
     def __init__(self, host: str = "", port: int = 53) -> None:
         self.value = "--"
+        self.jitter_value = "--"
         self._last = 0.0
         self._busy = False
+        self._samples: List[float] = []
         self._lock = threading.Lock()
         self.set_target(host, port)
 
@@ -1190,6 +1192,8 @@ class PingMonitor:
 
     def _probe(self) -> None:
         result = "--"
+        jitter_res = "--"
+        sample_ms = None
         try:
             for host, port in self._targets:
                 # with-block closes the socket even when connect() times out.
@@ -1198,13 +1202,30 @@ class PingMonitor:
                         sock.settimeout(0.75)
                         t0 = time.perf_counter()
                         sock.connect((host, port))
-                        result = f"{(time.perf_counter() - t0) * 1000.0:.0f} ms"
+                        diff_ms = (time.perf_counter() - t0) * 1000.0
+                        sample_ms = diff_ms
+                        result = f"{diff_ms:.0f} ms"
                     break
                 except OSError:
                     continue
         finally:
             with self._lock:
+                if sample_ms is not None:
+                    self._samples.append(sample_ms)
+                    if len(self._samples) > 10:
+                        self._samples.pop(0)
+                    if len(self._samples) >= 2:
+                        diffs = [abs(self._samples[i] - self._samples[i - 1]) for i in range(1, len(self._samples))]
+                        jitter_res = f"{sum(diffs) / len(diffs):.0f} ms"
+                    else:
+                        jitter_res = "--"
+                elif not self._samples:
+                    jitter_res = "--"
+                else:
+                    jitter_res = self.jitter_value
+
                 self.value = result
+                self.jitter_value = jitter_res
                 self._last = time.monotonic()
                 self._busy = False
 
@@ -1278,11 +1299,16 @@ class Tooltip:
                                           height=SPARKLINE_HEIGHT)
             self.spark_canvas.pack(fill="x", pady=(2, 0))
             self.system_row = tk.Frame(inner, bg=BG_CARD)
-            self.system_row.pack(fill="x", pady=(0, 5))
+            self.system_row.pack(fill="x", pady=(0, 4))
             self._metric(self.system_row, "cpu", "CPU", FG_CPU)
             self._metric(self.system_row, "ram", "RAM", FG_RAM)
             self._metric(self.system_row, "ping", "PING", FG_DIM)
-            # Network info row (local IP / public IP / Wi-Fi signal).
+            self._metric(self.system_row, "jitter", "JITTER", FG_DIM)
+            self.net_row = tk.Frame(inner, bg=BG_CARD)
+            self.net_row.pack(fill="x", pady=(0, 5))
+            self._metric(self.net_row, "local_ip", "LOCAL IP", FG_TEXT)
+            self._metric(self.net_row, "public_ip", "PUBLIC IP", FG_TEXT)
+            # Network info row (Wi-Fi signal).
             self.net_label = tk.Label(inner, text="", bg=BG_CARD, fg=FG_DIM,
                                       font=(FONT_FAMILY, self._scale(7)),
                                       anchor="w", justify="left")
@@ -3184,9 +3210,8 @@ class SpeedWidget:
         cpu_text, ram_text = self.sysload.text_short()
         self.ping.maybe_probe()
         info = self._net_info
-        net_line = (f"local {info.get('local_ip','--')}   "
-                    f"public {info.get('public_ip','--')}   "
-                    f"wifi {info.get('wifi','--')}")
+        wifi_val = info.get("wifi", "--")
+        net_line = f"wifi signal: {wifi_val}" if wifi_val != "--" else ""
         # Top-3 processes by sampled download bandwidth.
         proc_rows = sorted(self._proc_speed.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
         proc_text = "\n".join(
@@ -3198,6 +3223,9 @@ class SpeedWidget:
             "cpu": cpu_text.replace("CPU ", ""),
             "ram": ram_text.replace("RAM ", ""),
             "ping": self.ping.value,
+            "jitter": self.ping.jitter_value,
+            "local_ip": info.get("local_ip", "--"),
+            "public_ip": info.get("public_ip", "--"),
             "adapter": shorten("All adapters" if self.adapter == ALL_ADAPTERS else self.adapter, 22),
             "session": (f"today {format_bytes(self.totals.daily_down + self.totals.daily_up)}"
                         f"  ·  up {format_duration(self.totals.session_seconds)}"
