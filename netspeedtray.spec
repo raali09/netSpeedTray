@@ -109,6 +109,10 @@ except OSError:
 datas = []
 if os.path.exists(ICON_PNG):
     datas.append((ICON_PNG, '.'))
+if os.path.exists(VERSION_PATH):
+    # The frozen app reads VERSION at runtime for update comparisons.
+    # Without bundling it, _read_version() falls back to 2.7.0 forever.
+    datas.append((VERSION_PATH, '.'))
 
 # psutil ships some data files on Windows; collect them to be safe.
 datas += collect_data_files('psutil')

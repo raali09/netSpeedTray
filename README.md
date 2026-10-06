@@ -155,6 +155,15 @@ The app checks the latest GitHub release on startup (silently) and from the righ
 Update checks can be turned off by setting `check_updates_on_start` to `false` in
 `%APPDATA%\NetSpeedTray\config.json`.
 
+### Publishing a release on GitHub
+
+The release tag, `VERSION`, and the executable must contain the same version. Before
+publishing, change `VERSION` (for example, `2.7.1`), run the build script, and verify
+the packaged app with `NetSpeedTray.exe --version`. Then create a GitHub Release with
+the matching tag `v2.7.1` and upload `dist\NetSpeedTray.exe` as a release asset. Do not
+reuse an old executable or publish a release whose tag is newer than the version inside
+the executable, or every installed copy will keep offering the same update.
+
 ## App icon
 
 The icon is a green rounded square containing an upward arrow with a dot on top (a stylized
