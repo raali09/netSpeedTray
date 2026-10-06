@@ -1136,6 +1136,12 @@ def install_update(temp_exe: str) -> bool:
             # If copy never succeeded, restore the backup so the app still runs.
             fh.write('if not exist "' + current_exe + '" rename "' + backup_exe + '" "' + cur_name + '" >nul 2>&1\r\n')
             fh.write(":copied\r\n")
+            # PyInstaller 6.22+ treats inherited _PYI_* variables as a
+            # continuation of the old onefile instance. The old process has
+            # exited by the time this updater starts the replacement, so the
+            # bootloader rejects the new executable with "PID not found".
+            # Force a completely fresh onefile environment for the restart.
+            fh.write('set "PYINSTALLER_RESET_ENVIRONMENT=1"\r\n')
             fh.write(f'start "" "{current_exe}"\r\n')
             fh.write(f'del /f /q "{backup_exe}" >nul 2>&1\r\n')
             fh.write(f'del /f /q "{temp_exe}" >nul 2>&1\r\n')
