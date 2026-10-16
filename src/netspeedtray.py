@@ -113,8 +113,76 @@ FG_CHECK = "#55C7F3"
 
 BG_TRANSPARENT_KEY = "#0A0B0C"
 FG_TRANSPARENT_KEY = "#0D0E0F"
-SHADOW_COLOR = "#071019"
 TEXT_SHADOW_OFFSET = 1
+
+# --- Themes (v2.14.0) --------------------------------------------------------
+# The palette is a set of module-level globals, rebound by apply_theme(), so
+# every helper (tooltip, menus, card painter) picks up the active colors at
+# call time. "classic" is the exact 2.13 look; "midnight" is the new modern
+# default: a deeper glass navy with brighter cyan/amber readings and explicit
+# green/red connection colors.
+FG_OK = "#57C785"    # status dot: link + probes healthy
+FG_OFF = "#F27585"  # status dot: internet considered offline
+
+THEMES: Dict[str, Dict[str, str]] = {
+    "classic": {
+        "BG_CARD": "#101820",
+        "BG_SPEED_ROW": "#1B2733",
+        "BORDER_COLOR": "#344354",
+        "BORDER_SOFT": "#2A3745",
+        "FG_DOWN": "#55C7F3",
+        "FG_UP": "#F3AA55",
+        "FG_CPU": "#B9C4D0",
+        "FG_RAM": "#B9C4D0",
+        "FG_LABEL": "#8290A0",
+        "FG_TEXT": "#EAF0F6",
+        "FG_ALERT": "#F27585",
+        "FG_LOCK_FLASH": "#F0B45A",
+        "FG_DIM": "#AAB5C1",
+        "FG_CHECK": "#55C7F3",
+        "BG_HOVER": "#243343",
+        "SHADOW_COLOR": "#071019",
+        "FG_OK": "#57C785",
+        "FG_OFF": "#F27585",
+    },
+    "midnight": {
+        "BG_CARD": "#0F1826",
+        "BG_SPEED_ROW": "#1A2739",
+        "BORDER_COLOR": "#35506B",
+        "BORDER_SOFT": "#273850",
+        "FG_DOWN": "#4FD2FF",
+        "FG_UP": "#FFB454",
+        "FG_CPU": "#C5D1E0",
+        "FG_RAM": "#C5D1E0",
+        "FG_LABEL": "#7E8CA0",
+        "FG_TEXT": "#F2F6FB",
+        "FG_ALERT": "#FF5C73",
+        "FG_LOCK_FLASH": "#F0B45A",
+        "FG_DIM": "#B4C0CD",
+        "FG_CHECK": "#4FD2FF",
+        "BG_HOVER": "#24384F",
+        "SHADOW_COLOR": "#050B12",
+        "FG_OK": "#3DDC97",
+        "FG_OFF": "#FF5C6C",
+    },
+}
+THEMES_ORDER = ("midnight", "classic")
+DEFAULT_THEME = "midnight"
+
+
+def apply_theme(name: str) -> None:
+    """Rebind the module-level palette globals to the selected theme."""
+    globals().update(THEMES.get(name, THEMES[DEFAULT_THEME]))
+
+
+apply_theme(DEFAULT_THEME)
+
+# --- v2.14.0 card metrics -----------------------------------------------------
+GRAPH_BAND_HEIGHT = 22    # in-card sparkline band height (points, DPI-scaled)
+GRAPH_PAD = 3             # gap between the speed rows and the graph band
+STATUS_DOT_R = 2.5        # connection status dot radius (points)
+PING_RETRY_INTERVAL = 4.0        # re-probe quickly while offline is suspected
+OFFLINE_CONFIRM_ROUNDS = 2       # consecutive failed rounds => "offline"
 
 
 def _resolve_font_family() -> str:
@@ -160,8 +228,6 @@ FONT_SIZE_PROFILES = {
 DEFAULT_FONT_SIZE = "medium"
 
 FONT_MENU = (FONT_FAMILY, 9)
-BG_HOVER = "#243343"
-
 DEFAULT_OPACITY = 0.94
 MIN_OPACITY = 0.20
 MAX_OPACITY = 1.00
@@ -170,7 +236,7 @@ IDLE_BPS = 1024
 IDLE_TICKS = 5
 ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
-UI_VERSION = 22
+UI_VERSION = 23
 
 # Corner-radius appearance choices (user-selectable from the menu).
 CORNER_RADIUS_CHOICES = {
@@ -229,6 +295,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "adapter": ALL_ADAPTERS, "show_sysload": True, "compact": False, "ui_version": UI_VERSION,
     "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0, "font_size": DEFAULT_FONT_SIZE,
     "corner_radius": DEFAULT_CORNER_RADIUS,
+    "theme": DEFAULT_THEME,
+    "show_graph": True, "show_ping": True, "show_totals": True,
     "ping_host": "", "ping_port": 53,
     "daily_date": "", "daily_down": 0, "daily_up": 0,
     "check_updates_on_start": True,
@@ -495,10 +563,13 @@ class Config:
     def _sanitize(self) -> None:
         if self.data.get("font_size") not in FONT_SIZE_PROFILES:
             self.data["font_size"] = DEFAULT_FONT_SIZE
+        if self.data.get("theme") not in THEMES:
+            self.data["theme"] = DEFAULT_THEME
         if not isinstance(self.data.get("adapter"), str):
             self.data["adapter"] = ALL_ADAPTERS
         for flag in ("locked", "show_sysload", "compact", "auto_hide",
-                     "snap_edges", "check_updates_on_start"):
+                     "snap_edges", "check_updates_on_start",
+                     "show_graph", "show_ping", "show_totals"):
             if not isinstance(self.data.get(flag), bool):
                 self.data[flag] = bool(DEFAULT_CONFIG[flag])
         try:
@@ -549,6 +620,13 @@ class Config:
             self.data.setdefault("corner_radius", DEFAULT_CORNER_RADIUS)
             self.data.setdefault("ping_host", "")
             self.data.setdefault("ping_port", 53)
+        if old_version < 23:
+            # v2.14.0: modern "Midnight" theme, in-card speed graph, ping
+            # status strip and today's totals. setdefault keeps user choices.
+            self.data.setdefault("theme", DEFAULT_THEME)
+            self.data.setdefault("show_graph", True)
+            self.data.setdefault("show_ping", True)
+            self.data.setdefault("show_totals", True)
         self.data["ui_version"] = UI_VERSION
         self.save()
 
@@ -1175,6 +1253,11 @@ class PingMonitor:
         self._busy = False
         self._samples: List[float] = []
         self._lock = threading.Lock()
+        # v2.14.0: explicit connectivity verdict. None = not measured yet,
+        # True = at least one target reachable, False = every target failed
+        # for OFFLINE_CONFIRM_ROUNDS consecutive probe rounds.
+        self.online: Optional[bool] = None
+        self._fail_rounds = 0
         self.set_target(host, port)
 
     def set_target(self, host: str, port: int) -> None:
@@ -1191,7 +1274,10 @@ class PingMonitor:
 
     def maybe_probe(self, force: bool = False) -> None:
         now = time.monotonic()
-        if self._busy or (not force and now - self._last < PING_INTERVAL):
+        # Re-probe faster while offline (or suspecting it) so recovery is
+        # noticed quickly without hammering the targets when healthy.
+        interval = PING_RETRY_INTERVAL if self.online is False else PING_INTERVAL
+        if self._busy or (not force and now - self._last < interval):
             return
         self._busy = True
         threading.Thread(target=self._probe, daemon=True).start()
@@ -1217,6 +1303,8 @@ class PingMonitor:
         finally:
             with self._lock:
                 if sample_ms is not None:
+                    self.online = True
+                    self._fail_rounds = 0
                     self._samples.append(sample_ms)
                     if len(self._samples) > 10:
                         self._samples.pop(0)
@@ -1225,10 +1313,14 @@ class PingMonitor:
                         jitter_res = f"{sum(diffs) / len(diffs):.0f} ms"
                     else:
                         jitter_res = "--"
-                elif not self._samples:
-                    jitter_res = "--"
                 else:
-                    jitter_res = self.jitter_value
+                    self._fail_rounds += 1
+                    if self._fail_rounds >= OFFLINE_CONFIRM_ROUNDS:
+                        self.online = False
+                    if not self._samples:
+                        jitter_res = "--"
+                    else:
+                        jitter_res = self.jitter_value
 
                 self.value = result
                 self.jitter_value = jitter_res
@@ -1249,6 +1341,7 @@ class Tooltip:
         self.spark_canvas: Optional[tk.Canvas] = None
         self.net_label: Optional[tk.Label] = None
         self.proc_label: Optional[tk.Label] = None
+        self.live_label: Optional[tk.Label] = None
 
     @property
     def visible(self) -> bool:
@@ -1287,8 +1380,9 @@ class Tooltip:
             head.pack(fill="x", pady=(0, 7))
             tk.Label(head, text=APP_NAME, bg=BG_CARD, fg=FG_TEXT,
                      font=(FONT_FAMILY, self._scale(9), "bold")).pack(side="left")
-            tk.Label(head, text="LIVE", bg=BG_CARD, fg=FG_DOWN,
-                     font=(FONT_FAMILY, self._scale(7), "bold")).pack(side="right")
+            self.live_label = tk.Label(head, text="LIVE", bg=BG_CARD, fg=FG_DOWN,
+                                       font=(FONT_FAMILY, self._scale(7), "bold"))
+            self.live_label.pack(side="right")
             self.speed_row = tk.Frame(inner, bg=BG_CARD)
             self.speed_row.pack(fill="x", pady=(0, 4))
             self._metric(self.speed_row, "down", "DOWNLOAD", FG_DOWN)
@@ -1314,6 +1408,7 @@ class Tooltip:
             self.net_row.pack(fill="x", pady=(0, 5))
             self._metric(self.net_row, "local_ip", "LOCAL IP", FG_TEXT)
             self._metric(self.net_row, "public_ip", "PUBLIC IP", FG_TEXT)
+            self._metric(self.net_row, "status", "STATUS", FG_TEXT)
             # Network info row (Wi-Fi signal).
             self.net_label = tk.Label(inner, text="", bg=BG_CARD, fg=FG_DIM,
                                       font=(FONT_FAMILY, self._scale(7)),
@@ -1341,6 +1436,11 @@ class Tooltip:
             label = self.value_labels.get(key)
             if label is not None:
                 label.config(text=value)
+        # v2.14.0: the LIVE badge mirrors the explicit connection verdict.
+        live = data.get("_live")
+        if (isinstance(live, tuple) and len(live) == 2
+                and self.live_label is not None):
+            self.live_label.config(text=str(live[0]), fg=str(live[1]))
         self.foot.config(text=f"{data.get('adapter','')}  ·  {data.get('session','')}")
         # Redraw the sparkline from the rolling history (passed in _spark).
         if self.spark_canvas is not None:
@@ -1608,6 +1708,14 @@ class ModernContextPanel:
                   lambda: (w.sysload_var.set(not w.sysload_var.get()), w._on_toggle_sysload()))
         self._row(inner, "Compact taskbar mode", "ON" if w.compact_var.get() else "OFF",
                   lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
+        self._row(inner, "Speed graph", "ON" if w.graph_var.get() else "OFF",
+                  lambda: (w.graph_var.set(not w.graph_var.get()), w._on_toggle_graph()))
+        self._row(inner, "Ping & status", "ON" if w.pingshow_var.get() else "OFF",
+                  lambda: (w.pingshow_var.set(not w.pingshow_var.get()), w._on_toggle_ping()))
+        self._row(inner, "Today's totals", "ON" if w.totals_var.get() else "OFF",
+                  lambda: (w.totals_var.set(not w.totals_var.get()), w._on_toggle_totals()))
+        self._row(inner, "Theme", w.theme_key.capitalize(),
+                  lambda: w.theme_menu.post(x, y))
         self._row(inner, "Auto-hide when idle", "ON" if w.autohide_var.get() else "OFF",
                   lambda: (w.autohide_var.set(not w.autohide_var.get()), w._on_toggle_autohide()))
         self._row(inner, "Start with Windows", "ON" if is_autostart_enabled() else "OFF",
@@ -1973,6 +2081,8 @@ class SpeedWidget:
         self.ping = PingMonitor(str(self.config.get("ping_host", "")),
                                 int(self.config.get("ping_port", 53) or 53))
         self.update_checker = UpdateChecker()
+        # Resolve the connection verdict quickly after start-up.
+        self.ping.maybe_probe(force=True)
         # Sparkline: rolling 60-sample window of download/upload speeds (bytes/s).
         self._spark_down: List[float] = [0.0] * SPARKLINE_SAMPLES
         self._spark_up: List[float] = [0.0] * SPARKLINE_SAMPLES
@@ -2002,6 +2112,15 @@ class SpeedWidget:
         self._lock_flash = False
         self._high_contrast = False
         self._alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024.0 * 1024.0
+        # v2.14.0: theme + connection state + in-card graph / status strip.
+        self.theme_key = str(self.config.get("theme", DEFAULT_THEME))
+        if self.theme_key not in THEMES:
+            self.theme_key = DEFAULT_THEME
+        apply_theme(self.theme_key)
+        self._conn_state = "unknown"   # online / offline / unknown
+        self._strip_items: List[int] = []
+        self._status_dot: Optional[int] = None
+        self._graph_rect: Optional[Tuple[float, float, float, float]] = None
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
         self._suppress_bg_sync = False
@@ -2013,11 +2132,13 @@ class SpeedWidget:
             "down_icon": "\u2193", "up_icon": "\u2191",
             "down_value": "0 KB/s", "up_value": "0 KB/s",
             "cpu_badge": "CPU --", "ram_badge": "RAM --",
+            "ping_text": "--", "totals_text": "\u2193 0 B   \u2191 0 B",
         }
         self._current_colors: Dict[str, str] = {
             "down_icon": FG_DOWN, "up_icon": FG_UP,
             "down_value": FG_DOWN, "up_value": FG_UP,
             "cpu_badge": FG_CPU, "ram_badge": FG_RAM,
+            "ping_text": FG_LABEL, "totals_text": FG_DIM,
         }
 
         self.root = tk.Tk()
@@ -2225,6 +2346,14 @@ class SpeedWidget:
         self.row_h = max(self._text_size("0 KB/s", self.font_value)[1],
                          self._text_size("\u2193", self.font_icon)[1],
                          self._text_size("CPU --", self.font_system)[1]) + pad_y
+        # v2.14.0: graph band + status strip metrics (DPI-aware).
+        self.graph_h = int(round(GRAPH_BAND_HEIGHT * self.ui_scale))
+        self.dot_r = max(2, int(round(STATUS_DOT_R * self.ui_scale)))
+        self.strip_h = max(self._text_size("999 ms", self.font_system)[1] + 2,
+                           2 * self.dot_r + 4)
+        self._ping_px = self._text_size("OFFLINE", self.font_system)[0]
+        self._totals_px = self._text_size(
+            "\u2193 999.99 GB   \u2191 999.99 GB", self.font_system)[0]
         self.value_px = self._value_px_max
         self._recompute_width()
 
@@ -2247,6 +2376,44 @@ class SpeedWidget:
             return bool(self.sysload_var.get())
         return bool(self.config.get("show_sysload", True))
 
+    def _include_graph(self) -> bool:
+        if self.compact:
+            return False
+        if hasattr(self, "graph_var"):
+            return bool(self.graph_var.get())
+        return bool(self.config.get("show_graph", True))
+
+    def _include_ping(self) -> bool:
+        if self.compact:
+            return False
+        if hasattr(self, "pingshow_var"):
+            return bool(self.pingshow_var.get())
+        return bool(self.config.get("show_ping", True))
+
+    def _include_totals(self) -> bool:
+        if self.compact:
+            return False
+        if hasattr(self, "totals_var"):
+            return bool(self.totals_var.get())
+        return bool(self.config.get("show_totals", True))
+
+    def _include_strip(self) -> bool:
+        return not self.compact and (self._include_ping() or self._include_totals())
+
+    def _graph_pad(self) -> int:
+        return int(round(GRAPH_PAD * self.ui_scale))
+
+    def _compute_card_height(self) -> int:
+        """Total card height: speed rows + optional graph band + status strip."""
+        rows = 1 if self.compact else 2
+        height = rows * self.row_h
+        if self._include_graph():
+            height += self.graph_h + 2 * self._graph_pad()
+        if self._include_strip():
+            height += self.strip_h
+        height += 2 * (self.border + CONTENT_PAD_Y)
+        return int(max(height, 2 * self.radius + 4))
+
     def _recompute_width(self) -> None:
         speed_width = self.icon_px + ICON_GAP + self.value_px
         if self.compact:
@@ -2258,6 +2425,17 @@ class SpeedWidget:
             content = speed_width
             if self._include_sysload():
                 content += SEP_PAD + 1 + self.badge_px
+        if self._include_strip():
+            # v2.14.0: the status strip (dot + ping left, totals right) must
+            # fit without clipping when the speed readings are short.
+            strip_w = 0
+            if self._include_ping():
+                strip_w += 2 * self.dot_r + 4 + self._ping_px
+            if self._include_totals():
+                strip_w += self._totals_px
+            if strip_w:
+                strip_w += 4
+            content = max(content, strip_w)
         self.window_width = int(max(WINDOW_WIDTH,
                                     content + 2 * (self.border + CONTENT_PAD_X)))
 
@@ -2273,8 +2451,16 @@ class SpeedWidget:
             for item in items:
                 self.canvas.delete(item)
         self._text_items = {}
+        for item in getattr(self, "_strip_items", []):
+            try:
+                self.canvas.delete(item)
+            except tk.TclError:
+                pass
+        self._strip_items = []
+        self._status_dot = None
         if self.bg_canvas is not None:
             self.bg_canvas.delete("dynamic_sep")
+            self.bg_canvas.delete("graph_bg")
         self._sep_line = None
 
         left = self.border + CONTENT_PAD_X
@@ -2293,7 +2479,6 @@ class SpeedWidget:
             self._make_text("up_value", speed_right, self._row_y(1), self._current_texts["up_value"], self.font_value, self._current_colors["up_value"], "e")
 
         if self._include_sysload():
-            sep_x = speed_right + SEP_PAD
             badge_right = self.window_width - self.border - CONTENT_PAD_X
             self._make_text("cpu_badge", badge_right, self._row_y(0),
                             self._current_texts["cpu_badge"], self.font_system,
@@ -2301,9 +2486,43 @@ class SpeedWidget:
             self._make_text("ram_badge", badge_right, self._row_y(1),
                             self._current_texts["ram_badge"], self.font_system,
                             self._current_colors["ram_badge"], "e")
-            self._draw_separator(self._card_h)
+            self._draw_separator(self._rows_bottom())
 
-    def _draw_separator(self, height: int) -> None:
+        rows = 1 if self.compact else 2
+        # v2.14.0: in-card graph band geometry. The lines themselves are
+        # (re)drawn from the rolling history by _refresh_graph each tick.
+        if self._include_graph():
+            gx1 = float(self.border + CONTENT_PAD_X)
+            gx2 = float(self.window_width - self.border - CONTENT_PAD_X)
+            gy1 = float(self.border + CONTENT_PAD_Y + rows * self.row_h
+                        + self._graph_pad())
+            self._graph_rect = (gx1, gy1, gx2, gy1 + float(self.graph_h))
+        else:
+            self._graph_rect = None
+
+        # v2.14.0: status strip — connection dot + ping on the left, today's
+        # totals on the right, in one slim line under the graph.
+        if self._include_strip():
+            card_h = self._compute_card_height()
+            cy = card_h - self.border - CONTENT_PAD_Y - self.strip_h / 2.0
+            left = float(self.border + CONTENT_PAD_X)
+            if self._include_ping():
+                r = float(self.dot_r)
+                cx = left + r
+                self._status_dot = self.canvas.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    fill=self._dot_color(), outline=SHADOW_COLOR, width=1)
+                self._strip_items.append(self._status_dot)
+                self._make_text("ping_text", left + 2 * self.dot_r + 4, cy,
+                                self._current_texts["ping_text"], self.font_system,
+                                self._current_colors["ping_text"], "w")
+            if self._include_totals():
+                right = float(self.window_width - self.border - CONTENT_PAD_X)
+                self._make_text("totals_text", right, cy,
+                                self._current_texts["totals_text"], self.font_system,
+                                self._current_colors["totals_text"], "e")
+
+    def _draw_separator(self, bottom_y: float) -> None:
         if self.bg_canvas is None:
             return
         self.bg_canvas.delete("dynamic_sep")
@@ -2313,7 +2532,7 @@ class SpeedWidget:
         sep_x = (self.border + CONTENT_PAD_X + self.icon_px + ICON_GAP + self.value_px + SEP_PAD)
         self._sep_line = self.bg_canvas.create_line(
             sep_x, self.border + CONTENT_PAD_Y + 2,
-            sep_x, height - self.border - CONTENT_PAD_Y - 2,
+            sep_x, bottom_y,
             fill=BORDER_SOFT, width=1, tags="dynamic_sep")
 
     def _row_y(self, row: int) -> float:
@@ -2420,11 +2639,15 @@ class SpeedWidget:
                 self.bg_canvas.delete(item)
         else:
             self._card_shapes = outer + inner
-        for item in self._card_shapes:
+        # Lower in reverse so the outer border ring ends up *below* the inner
+        # surface (lowering in list order used to flip the stack, painting the
+        # whole card in the border color — a long-standing rendering bug).
+        for item in reversed(self._card_shapes):
             self.bg_canvas.tag_lower(item)
 
     def _border_color(self) -> str:
-        """Border color: amber flash when a locked drag is attempted, else neutral.
+        """Border color: red ring while offline, amber flash when a locked
+        drag is attempted, else neutral.
 
         In High Contrast mode the border is forced to the system window-frame
         color so the card outline remains visible against the high-contrast
@@ -2432,7 +2655,131 @@ class SpeedWidget:
         """
         if getattr(self, "_high_contrast", False):
             return "#000000"
+        if self._conn_state == "offline":
+            return FG_OFF
         return FG_LOCK_FLASH if self._lock_flash else BORDER_COLOR
+
+    def _rows_bottom(self) -> int:
+        rows = 1 if self.compact else 2
+        return self.border + CONTENT_PAD_Y + rows * self.row_h + 2
+
+    def _graph_bg_color(self) -> str:
+        return "#E2E2E2" if getattr(self, "_high_contrast", False) else BG_SPEED_ROW
+
+    def _draw_graph_bg(self) -> None:
+        """Paint the rounded band the in-card sparkline sits on (card layer,
+        so it fades together with the card via the transparency slider)."""
+        if self.bg_canvas is None:
+            return
+        self.bg_canvas.delete("graph_bg")
+        rect = getattr(self, "_graph_rect", None)
+        if not rect or not self._include_graph():
+            return
+        x1, y1, x2, y2 = rect
+        items = self._rounded_rect(self.bg_canvas, x1, y1, x2, y2, 3.0,
+                                   self._graph_bg_color())
+        for item in items:
+            self.bg_canvas.itemconfig(item, tags="graph_bg")
+
+    def _refresh_graph(self) -> None:
+        """Redraw the two in-card sparklines (download/upload) each tick."""
+        if self.canvas is None or not self._include_graph():
+            return
+        self.canvas.delete("graph")
+        rect = getattr(self, "_graph_rect", None)
+        if not rect:
+            return
+        down, up = self._spark_down, self._spark_up
+        x1, y1, x2, y2 = rect
+        w, h = x2 - x1, y2 - y1
+        if w <= 4 or h <= 4:
+            return
+        peak = max([1.0] + list(down) + list(up))
+        n = len(down)
+        if n < 2:
+            return
+
+        def pts(series: List[float]) -> List[Tuple[float, float]]:
+            out: List[Tuple[float, float]] = []
+            for i, v in enumerate(series):
+                frac = min(1.0, max(0.0, v) / peak)
+                out.append((x1 + (i / (n - 1)) * w,
+                            y2 - 1 - frac * (h - 2)))
+            return out
+
+        self.canvas.create_line(pts(down), fill=FG_DOWN, width=1,
+                                smooth=True, tags="graph")
+        self.canvas.create_line(pts(up), fill=FG_UP, width=1,
+                                smooth=True, tags="graph")
+
+    def _dot_color(self) -> str:
+        if getattr(self, "_high_contrast", False):
+            return {"online": "#107C10",
+                    "offline": "#C50F1F"}.get(self._conn_state, "#5A5A5A")
+        return {"online": FG_OK,
+                "offline": FG_OFF}.get(self._conn_state, FG_LABEL)
+
+    def _update_status_strip(self) -> None:
+        """Refresh dot color, ping text and today's totals in the strip."""
+        if not self._include_strip():
+            return
+        if self._include_ping():
+            if self._conn_state == "offline":
+                self._set_text("ping_text", "OFFLINE", FG_OFF)
+            else:
+                value = self.ping.value
+                color = FG_DIM if value != "--" else FG_LABEL
+                self._set_text("ping_text", value, color)
+            dot = getattr(self, "_status_dot", None)
+            if dot is not None and self.canvas is not None:
+                try:
+                    self.canvas.itemconfig(dot, fill=self._dot_color())
+                except tk.TclError:
+                    pass
+        if self._include_totals():
+            text = (f"\u2193 {format_bytes(self.totals.daily_down)}"
+                    f"   \u2191 {format_bytes(self.totals.daily_up)}")
+            self._set_text("totals_text", text, FG_DIM)
+
+    def _link_up(self) -> bool:
+        """True when at least one non-loopback interface has link."""
+        try:
+            stats = psutil.net_if_stats() or {}
+        except Exception:
+            return True
+        if not stats:
+            return True
+        for name, entry in stats.items():
+            if not getattr(entry, "isup", False):
+                continue
+            low = name.lower()
+            if low.startswith(("loopback", "lo", "isatp", "teredo")):
+                continue
+            return True
+        return False
+
+    def _evaluate_connection(self) -> None:
+        """Explicit online/offline verdict: link state + probe outcome."""
+        if not self._link_up():
+            self._set_connection_state("offline")
+            return
+        online = getattr(self.ping, "online", None)
+        if online is True:
+            self._set_connection_state("online")
+        elif online is False:
+            self._set_connection_state("offline")
+        else:
+            self._set_connection_state("unknown")
+
+    def _set_connection_state(self, state: str) -> None:
+        if state == self._conn_state:
+            return
+        self._conn_state = state
+        self._update_status_strip()
+        # Red border ring + red dot + OFFLINE text make "internet is down"
+        # unmistakable — and clearly distinct from "no traffic" (which simply
+        # reads 0 KB/s with a green dot).
+        self._draw_card(self._card_w, self._card_h)
 
     def _sync_layer_geometry(self, x: int, y: int, width: int, height: int) -> None:
         """Move both layers atomically enough to avoid a one-frame ghost/offset."""
@@ -2441,9 +2788,7 @@ class SpeedWidget:
             self.bg_window.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
 
     def _apply_geometry(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
-        rows = 1 if self.compact else 2
-        height = max(rows * self.row_h + 2 * (self.border + CONTENT_PAD_Y),
-                     2 * self.radius + 4)
+        height = self._compute_card_height()
         self._card_w, self._card_h = self.window_width, height
         if x is None or y is None:
             x, y = self.root.winfo_x(), self.root.winfo_y()
@@ -2453,7 +2798,8 @@ class SpeedWidget:
         if self.bg_window is not None and self.bg_canvas is not None:
             self.bg_canvas.config(width=self.window_width, height=height)
             self._draw_card(self.window_width, height)
-            self._draw_separator(height)
+            self._draw_graph_bg()
+            self._draw_separator(self._rows_bottom())
         self.root.update_idletasks()
         self._raise_windows(force=True)
 
@@ -2469,6 +2815,8 @@ class SpeedWidget:
         self._relayout()
         if self._include_sysload():
             self._update_system_labels()
+        self._update_status_strip()
+        self._refresh_graph()
         if self.locked:
             self._enforce_locked_position()
 
@@ -2507,6 +2855,15 @@ class SpeedWidget:
         self.compact_var = tk.BooleanVar(value=self.compact)
         self.menu.add_checkbutton(label="Compact taskbar mode", variable=self.compact_var,
                                    command=self._on_toggle_compact, selectcolor=FG_CHECK)
+        self.graph_var = tk.BooleanVar(value=bool(self.config.get("show_graph", True)))
+        self.menu.add_checkbutton(label="Show speed graph", variable=self.graph_var,
+                                   command=self._on_toggle_graph, selectcolor=FG_CHECK)
+        self.pingshow_var = tk.BooleanVar(value=bool(self.config.get("show_ping", True)))
+        self.menu.add_checkbutton(label="Show ping & status", variable=self.pingshow_var,
+                                   command=self._on_toggle_ping, selectcolor=FG_CHECK)
+        self.totals_var = tk.BooleanVar(value=bool(self.config.get("show_totals", True)))
+        self.menu.add_checkbutton(label="Show today's totals", variable=self.totals_var,
+                                   command=self._on_toggle_totals, selectcolor=FG_CHECK)
         self.font_size_var = tk.StringVar(value=self.font_size_key)
         self.font_menu = tk.Menu(self.menu, **menu_opts)
         for fkey in ("small", "medium", "large", "xlarge"):
@@ -2526,6 +2883,16 @@ class SpeedWidget:
                 command=lambda k=ckey: self.set_corner_radius(k),
                 selectcolor=FG_CHECK)
         self.menu.add_cascade(label="Corner style", menu=self.corner_menu)
+        # Theme choice (v2.14.0): Midnight (modern) or Classic (2.13 look).
+        self.theme_var = tk.StringVar(value=self.theme_key)
+        self.theme_menu = tk.Menu(self.menu, **menu_opts)
+        for tkey in THEMES_ORDER:
+            self.theme_menu.add_radiobutton(
+                label=tkey.capitalize(), value=tkey,
+                variable=self.theme_var,
+                command=lambda k=tkey: self.set_theme(k),
+                selectcolor=FG_CHECK)
+        self.menu.add_cascade(label="Theme", menu=self.theme_menu)
         self.menu.add_command(label="Background transparency\u2026", command=self._open_opacity_popup)
         # Custom ping target (v2.7.0): opens a small prompt to set host[:port].
         self.menu.add_command(label="Set ping target\u2026", command=self._set_ping_target)
@@ -2631,6 +2998,40 @@ class SpeedWidget:
         self.compact = bool(self.compact_var.get())
         self.config.set("compact", self.compact, save=True)
         self._refresh_layout()
+
+    def _on_toggle_graph(self) -> None:
+        self.config.set("show_graph", bool(self.graph_var.get()), save=True)
+        self._refresh_layout()
+
+    def _on_toggle_ping(self) -> None:
+        self.config.set("show_ping", bool(self.pingshow_var.get()), save=True)
+        self._refresh_layout()
+
+    def _on_toggle_totals(self) -> None:
+        self.config.set("show_totals", bool(self.totals_var.get()), save=True)
+        self._refresh_layout()
+
+    def set_theme(self, key: str) -> None:
+        """Switch the palette at runtime; every surface rebuilds on demand."""
+        if key not in THEMES:
+            return
+        apply_theme(key)
+        self.theme_key = key
+        self.config.set("theme", key, save=True)
+        if hasattr(self, "theme_var"):
+            self.theme_var.set(key)
+        # Recolor cached item colors, then rebuild: the menu bakes its colors
+        # at build time, and _relayout recreates every canvas item anyway.
+        self._current_colors.update({
+            "down_icon": FG_DOWN, "up_icon": FG_UP,
+            "down_value": FG_DOWN, "up_value": FG_UP,
+            "cpu_badge": FG_CPU, "ram_badge": FG_RAM,
+            "ping_text": FG_LABEL, "totals_text": FG_DIM,
+        })
+        self._card_shapes = []          # force a full card repaint
+        self._build_menu()
+        self._refresh_layout()
+        self._refresh_labels(self.last_down, self.last_up)  # reapply alert colors
 
     def _open_opacity_popup(self) -> None:
         self.opacity_popup.toggle()
@@ -3223,7 +3624,14 @@ class SpeedWidget:
         proc_text = "\n".join(
             f"  {shorten(name,18).ljust(18)} \u2193{format_speed(d):>9}  \u2191{format_speed(u):>9}"
             for name, (d, u) in proc_rows) or "  --"
+        # v2.14.0: explicit connection verdict for the STATUS cell + badge.
+        status = {"online": "ONLINE", "offline": "OFFLINE"}.get(self._conn_state, "--")
+        live = {"online": ("LIVE", FG_OK),
+                "offline": ("OFFLINE", FG_OFF)}.get(self._conn_state,
+                                                    ("LIVE", FG_DOWN))
         return {
+            "status": status,
+            "_live": live,
             "down": format_speed(self.last_down),
             "up": format_speed(self.last_up),
             "cpu": cpu_text.replace("CPU ", ""),
@@ -3283,6 +3691,7 @@ class SpeedWidget:
             self.totals.note_speed(down, up)
             # Feed the rolling sparkline history (bytes/s -> keep raw).
             self._sparkline_push(down_bytes, up_bytes)
+            self._refresh_graph()
             self._refresh_labels(down, up)
             self._update_idle_state(down, up)
         except Exception:
@@ -3297,6 +3706,9 @@ class SpeedWidget:
         try:
             # Latency probe runs on its own throttle (non-blocking).
             self.ping.maybe_probe()
+            # v2.14.0: explicit online/offline verdict + status strip refresh.
+            self._evaluate_connection()
+            self._update_status_strip()
             # Refresh local/public IP + Wi-Fi signal lazily (~30s).
             self._refresh_net_info()
             # Per-process speed sampling (~every tick is fine; it is cheap
@@ -3310,6 +3722,7 @@ class SpeedWidget:
                 self._high_contrast = hc
                 self._card_shapes = []
                 self._draw_card(self._card_w, self._card_h)
+                self._draw_graph_bg()
             self._enforce_taskbar_dock()
             self._raise_windows()
             if self.bg_window is not None and not self._suppress_bg_sync:

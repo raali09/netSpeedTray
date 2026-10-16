@@ -11,7 +11,27 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
-## What's new in 2.13.0
+## What's new in 2.14.0
+
+The **"Modern Glass"** release — the card itself gets a visual and information
+upgrade, with no new dependencies:
+
+- **Modern Midnight theme** (new default) — deeper glass-navy card, brighter
+  cyan/amber readings, green/red connection colors. The old look is one click
+  away: right-click → *Theme* → *Classic*.
+- **Speed graph in the card** — a live dual-line sparkline of download/upload
+  now lives directly under the readings (no hover needed).
+- **Status strip** — `● 12 ms` connection dot + live latency on the left,
+  today's totals (`↓ 3.48 GB ↑ 876 MB`) on the right.
+- **Explicit offline detection** — when the internet goes down the border ring,
+  dot and ping text turn red with an `OFFLINE` label — clearly different from
+  *no traffic*, which simply reads `0 KB/s` with a green dot. Detection uses
+  two signals: interface link state plus failed probes to Cloudflare/Google
+  DNS with a fast retry cadence, so recovery is noticed within seconds.
+- Each new element (graph, ping, totals) can be toggled individually from the
+  right-click menu; compact taskbar mode stays a single tight row.
+
+## What was new in 2.13.0
 
 A maintenance release with **no application changes**: the widget is exactly the
 2.12.0 code. What is restored is the release automation — pushing a `v*` tag now
@@ -227,6 +247,10 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 | `x`, `y` | Saved window position |
 | `adapter` | Adapter name, or `__all__` for the combined total |
 | `show_sysload` | Show the CPU / RAM badges |
+| `show_graph` | Show the in-card download/upload sparkline (v2.14.0) |
+| `show_ping` | Show the connection dot + latency in the status strip (v2.14.0) |
+| `show_totals` | Show today's traffic totals in the status strip (v2.14.0) |
+| `theme` | `midnight` (modern, default) or `classic` (the 2.13 look) |
 | `alert_mbps` | Highlight the readings above this speed, `0` turns it off |
 | `check_updates_on_start` | Silently check GitHub for a newer release on launch |
 
@@ -235,14 +259,10 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 ```
 NetSpeedTray/
 ├── src/
-│   ├── netspeedtray.py        # entry point — UI classes and the main loop
+│   ├── netspeedtray.py        # entry point — UI classes, themes and the main loop
 │   └── net_speed/             # backend package (v2.7.0 modular split)
-│       ├── constants.py       # Win32 magic numbers, colours, defaults
-│       ├── win32.py           # raw Win32 calls (taskbar z-order, signal, etc.)
-│       ├── utils.py           # formatting, version parsing, helpers
-│       ├── config.py          # JSON config load / save (batch writes)
-│       ├── monitors.py        # speed / CPU / RAM / per-process / IP / Wi-Fi sampling
-│       └── updates.py         # GitHub release check + auto-swap installer
+│       ├── __init__.py
+│       └── utils.py           # formatting, adapter listing, version parsing
 ├── tests/                     # pytest suite — run with `pytest tests/`
 ├── assets/
 │   ├── icon.png               # window / taskbar icon
@@ -253,6 +273,9 @@ NetSpeedTray/
 ├── CONTRIBUTING.md            # how to set up a dev environment & contribute
 ├── LICENSE                    # MIT
 ├── CHANGELOG.md
+├── VERSION                    # single source of truth for the version
+├── version_info.txt           # PyInstaller exe version resource
+├── netspeedtray.spec           # PyInstaller build spec (windowed exe)
 ├── screenshots/
 │   └── main.png
 ├── build_exe.bat              # optional: build dist\NetSpeedTray.exe

@@ -4,6 +4,37 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0] - 2026-10-16
+
+The "Modern Glass" release — a visual and information upgrade for the card
+itself, built on the exact same single-file core (no new dependencies).
+
+### Added
+- **Modern "Midnight" theme** (new default) — a deeper glass-navy card with
+  brighter cyan/amber readings and an explicit green/red connection palette.
+  The previous look remains available as **Classic** (right-click → Theme).
+- **In-card speed graph** — a live dual-line sparkline (download + upload) is
+  now drawn inside the card, under the speed readings. Toggle: *Show speed
+  graph*. Fades together with the card via the transparency slider while the
+  curves stay crisp.
+- **Status strip** — a slim line under the graph with a connection dot and the
+  live latency on the left (`● 12 ms`) and today's traffic totals on the right
+  (`↓ 3.48 GB ↑ 876 MB`). Toggle each half via *Show ping & status* and
+  *Show today's totals*.
+- **Explicit offline detection** — the card now tells you *the internet is
+  down* instead of silently reading 0 KB/s: two independent signals (network
+  link state + failed probe rounds against Cloudflare/Google DNS with a
+  fast retry cadence) turn the border ring, the status dot and the ping text
+  red with an `OFFLINE` label, clearly distinct from "no traffic" (green dot,
+  plain 0 KB/s). The tooltip gains a STATUS cell and a LIVE/OFFLINE badge.
+- **Card rendering fix** — the rounded-card painter lowered its shapes in an
+  order that flipped the canvas stack, painting the whole card in the border
+  colour and hiding the intended surface colour (and the new graph band).
+  Shapes are now lowered in reverse, so the border ring and surface render
+  exactly as designed.
+- New config keys: `theme`, `show_graph`, `show_ping`, `show_totals`
+  (`ui_version` 23; existing configs migrate automatically).
+
 ## [2.13.0] - 2026-10-16
 
 Maintenance release — **no application changes**. The widget itself is exactly
