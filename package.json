@@ -1,9 +1,9 @@
 {
-  "name": "speed-meter",
-  "version": "1.1.0",
+  "name": "netspeedtray",
+  "version": "2.13.0",
   "description": "آزمونگر سرعت اینترنت — ویجت ویندوزی و وب‌اپ با اندازه‌گیری واقعی سرعت و تشخیص صریح قطعی اینترنت (Next.js + Electron + Prisma)",
   "private": true,
-  "author": "Speed Meter Project",
+  "author": "raali09",
   "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",

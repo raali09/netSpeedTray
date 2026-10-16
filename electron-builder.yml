@@ -1,11 +1,11 @@
 # پیکربندی electron-builder — ساخت ویجت ویندوزی (exe)
 # خروجی‌ها در پوشهٔ release/ ساخته می‌شوند:
-#   SpeedMeter-Setup-x.y.z.exe      (نصب‌شوندهٔ NSIS)
-#   SpeedMeter-Portable-x.y.z.exe   (بدون نیاز به نصب)
+#   NetSpeedTray-Setup-x.y.z.exe      (نصب‌شوندهٔ NSIS)
+#   NetSpeedTray-Portable-x.y.z.exe   (بدون نیاز به نصب و دسترسی مدیر)
 
-appId: ir.speedmeter.widget
-productName: Speed Meter Widget
-copyright: Copyright © Speed Meter Project
+appId: com.raali09.netspeedtray
+productName: NetSpeedTray
+copyright: Copyright © raali09
 
 directories:
   output: release
@@ -28,7 +28,7 @@ extraResources:
 asar: true
 
 win:
-  icon: build/icon.png
+  icon: build/icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -40,7 +40,8 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  artifactName: SpeedMeter-Setup-${version}.${ext}
+  shortcutName: NetSpeedTray
+  artifactName: NetSpeedTray-Setup-${version}.${ext}
 
 portable:
-  artifactName: SpeedMeter-Portable-${version}.${ext}
+  artifactName: NetSpeedTray-Portable-${version}.${ext}

@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 const LS_KEY = "speedmeter:history";
 const HISTORY_CAP = 20;
 // نسخهٔ برنامه — با package.json هماهنگ نگه دارید
-const APP_VERSION = "۱٫۱٫۰";
+const APP_VERSION = "۲٫۱۳٫۰";
 
 function loadLocalHistory(): HistoryItem[] {
   try {
