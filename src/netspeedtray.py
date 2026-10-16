@@ -178,8 +178,6 @@ def apply_theme(name: str) -> None:
 apply_theme(DEFAULT_THEME)
 
 # --- v2.14.0 card metrics -----------------------------------------------------
-GRAPH_BAND_HEIGHT = 22    # in-card sparkline band height (points, DPI-scaled)
-GRAPH_PAD = 3             # gap between the speed rows and the graph band
 STATUS_DOT_R = 2.5        # connection status dot radius (points)
 PING_RETRY_INTERVAL = 4.0        # re-probe quickly while offline is suspected
 OFFLINE_CONFIRM_ROUNDS = 2       # consecutive failed rounds => "offline"
@@ -236,7 +234,7 @@ IDLE_BPS = 1024
 IDLE_TICKS = 5
 ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
-UI_VERSION = 23
+UI_VERSION = 24
 
 # Corner-radius appearance choices (user-selectable from the menu).
 CORNER_RADIUS_CHOICES = {
@@ -264,7 +262,9 @@ VALUE_SAMPLE = "999 MB/s"
 # Padding that used to come free from tk.Label defaults; explicit now that
 # text is measured with font metrics, so the card keeps its old proportions.
 GLYPH_PAD_X = 4
-GLYPH_PAD_Y = 4
+# v2.15.0 "Compact": tighter row spacing so the card stays as small as
+# possible (the user asked for a widget with minimal vertical footprint).
+GLYPH_PAD_Y = 2
 GWL_EXSTYLE = -20
 GWLP_HWNDPARENT = -8
 WS_EX_TOOLWINDOW = 0x00000080
@@ -296,7 +296,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0, "font_size": DEFAULT_FONT_SIZE,
     "corner_radius": DEFAULT_CORNER_RADIUS,
     "theme": DEFAULT_THEME,
-    "show_graph": True, "show_ping": True, "show_totals": True,
+    "show_ping": True, "show_totals": True,
     "ping_host": "", "ping_port": 53,
     "daily_date": "", "daily_down": 0, "daily_up": 0,
     "check_updates_on_start": True,
@@ -569,7 +569,7 @@ class Config:
             self.data["adapter"] = ALL_ADAPTERS
         for flag in ("locked", "show_sysload", "compact", "auto_hide",
                      "snap_edges", "check_updates_on_start",
-                     "show_graph", "show_ping", "show_totals"):
+                     "show_ping", "show_totals"):
             if not isinstance(self.data.get(flag), bool):
                 self.data[flag] = bool(DEFAULT_CONFIG[flag])
         try:
@@ -621,12 +621,16 @@ class Config:
             self.data.setdefault("ping_host", "")
             self.data.setdefault("ping_port", 53)
         if old_version < 23:
-            # v2.14.0: modern "Midnight" theme, in-card speed graph, ping
-            # status strip and today's totals. setdefault keeps user choices.
+            # v2.14.0: modern "Midnight" theme, ping status strip and today's
+            # totals. setdefault keeps user choices.
             self.data.setdefault("theme", DEFAULT_THEME)
-            self.data.setdefault("show_graph", True)
             self.data.setdefault("show_ping", True)
             self.data.setdefault("show_totals", True)
+        if old_version < 24:
+            # v2.15.0: the in-card speed graph was removed at the user's
+            # request (the widget is a compact meter; the graph lives on in
+            # the hover tooltip) — drop the stale key from old configs.
+            self.data.pop("show_graph", None)
         self.data["ui_version"] = UI_VERSION
         self.save()
 
@@ -682,7 +686,7 @@ class Config:
 # existing ``netspeedtray.format_speed`` style access keeps working.
 from net_speed.utils import (
     list_adapters, adapter_status_map,
-    format_speed, format_bytes, format_duration, shorten,
+    format_speed, format_bytes, format_bytes_compact, format_duration, shorten,
     compare_versions, _maybe_int,
 )
 
@@ -812,8 +816,19 @@ class SystemLoad:
 
 
 class ProcessScanner:
-    def __init__(self, top_n: int = 5) -> None:
-        self.top_n, self.rows = top_n, ["scanning\u2026"]
+    """Background scanner of per-app network activity.
+
+    v2.15.0: instead of only formatted "N conn" rows, the scan now keeps the
+    ranked app names, their connection counts and a status message, so the
+    App Usage Dashboard can join them with the live per-app byte rates that
+    :meth:`SpeedWidget._sample_proc_speed` derives from process IO counters.
+    """
+
+    def __init__(self, top_n: int = 8) -> None:
+        self.top_n = top_n
+        self.names: List[str] = []          # ranked connection-holder app names
+        self.counts: Dict[str, int] = {}     # app name -> active connection count
+        self.status = "scanning\u2026"       # shown when no rows are available
         self._lock, self._busy, self._last_scan = threading.Lock(), False, 0.0
         self._name_cache: Dict[int, str] = {}
 
@@ -836,14 +851,18 @@ class ProcessScanner:
         self._busy = True
         threading.Thread(target=self._scan, daemon=True).start()
 
-    def snapshot(self) -> List[str]:
+    def ranked(self) -> List[Tuple[str, int]]:
+        """Snapshot of (app name, connection count), ranked by count."""
         with self._lock:
-            return list(self.rows)
+            return list(zip(self.names,
+                            (self.counts.get(n, 0) for n in self.names)))
 
     def _scan(self) -> None:
-        rows: List[str] = []
+        names: List[str] = []
+        counts: Dict[str, int] = {}
+        status = ""
         try:
-            counts: Dict[int, int] = {}
+            pid_counts: Dict[int, int] = {}
             denied = False
             try:
                 connections = psutil.net_connections(kind="inet")
@@ -853,23 +872,22 @@ class ProcessScanner:
                 connections = []
             for conn in connections:
                 if conn.pid and conn.raddr:
-                    counts[conn.pid] = counts.get(conn.pid, 0) + 1
-            if not counts:
-                rows = ["run as administrator for details"] if denied else ["no active connections"]
+                    pid_counts[conn.pid] = pid_counts.get(conn.pid, 0) + 1
+            if not pid_counts:
+                status = "run as administrator for details" if denied else "no active connections"
             else:
                 merged: Dict[str, int] = {}
-                for pid, count in counts.items():
+                for pid, count in pid_counts.items():
                     name = self._name_for(pid)
                     merged[name] = merged.get(name, 0) + count
                 ranked = sorted(merged.items(), key=lambda item: item[1], reverse=True)
-                rows = [f"  {shorten(name, 22).ljust(22)}{count:>3} conn" for name, count in ranked[:self.top_n]]
-                if len(ranked) > self.top_n:
-                    rows.append(f"  +{len(ranked) - self.top_n} more")
+                names = [name for name, _count in ranked[:self.top_n]]
+                counts = dict(ranked[:self.top_n])
         except Exception:
-            rows = ["unavailable"]
+            status = "unavailable"
         finally:
             with self._lock:
-                self.rows = rows
+                self.names, self.counts, self.status = names, counts, status
             self._last_scan, self._busy = time.monotonic(), False
 
 
@@ -1506,12 +1524,32 @@ class Tooltip:
 
 
 class AppUsageDashboard:
-    """Modern flyout dashboard displaying real-time per-app active network connections."""
+    """Live flyout dashboard of per-app download/upload traffic.
+
+    v2.15.0: the old dashboard only listed connection counts, refreshed every
+    2.5 s — the user never saw live upload/download amounts per app. It now
+    shows name / live ↓ rate / live ↑ rate / session total in themed colors,
+    refreshed every second from the widget's sampled per-app IO deltas, with
+    a LIVE badge that flips to OFFLINE with the connection state.
+    """
+
+    #: Column layout (monospace): name, live download, live upload,
+    #: session total, active connections — each its own colored label.
+    COLUMNS: Tuple[Tuple[str, int, str, str], ...] = (
+        ("name", 20, "w", "FG_TEXT"),
+        ("down", 13, "e", "FG_DOWN"),
+        ("up", 13, "e", "FG_UP"),
+        ("session", 10, "e", "FG_DIM"),
+        ("conns", 6, "e", "FG_LABEL"),
+    )
+
     def __init__(self, parent: tk.Misc, widget: "SpeedWidget") -> None:
         self.parent = parent
         self.widget = widget
         self.window: Optional[tk.Toplevel] = None
         self._timer: Optional[str] = None
+        self._rows: List[Tuple[tk.Frame, List[tk.Label]]] = []
+        self._last_values: Optional[List[Tuple[str, ...]]] = None
 
     def close(self) -> None:
         if self._timer is not None:
@@ -1531,26 +1569,42 @@ class AppUsageDashboard:
         self.window.attributes("-topmost", True)
         self.window.configure(bg=BORDER_COLOR)
 
-        inner = tk.Frame(self.window, bg=BG_CARD, padx=12, pady=10)
+        inner = tk.Frame(self.window, bg=BG_CARD, padx=10, pady=8)
         inner.pack(padx=1, pady=1)
 
+        # Header: title + LIVE badge + close button.
         head = tk.Frame(inner, bg=BG_CARD)
-        head.pack(fill="x", pady=(0, 8))
-        tk.Label(head, text="Network Activity Dashboard", bg=BG_CARD, fg=FG_TEXT,
+        head.pack(fill="x", pady=(0, 6))
+        tk.Label(head, text="App Network Usage", bg=BG_CARD, fg=FG_TEXT,
                  font=(FONT_FAMILY, 9, "bold")).pack(side="left")
-        close_btn = tk.Label(head, text="✕", bg=BG_CARD, fg=FG_LABEL,
+        self._live_label = tk.Label(head, text="\u25cf LIVE", bg=BG_CARD, fg=FG_OK,
+                                    font=(FONT_FAMILY, 7, "bold"))
+        self._live_label.pack(side="left", padx=(8, 0))
+        close_btn = tk.Label(head, text="\u2715", bg=BG_CARD, fg=FG_LABEL,
                              font=(FONT_FAMILY, 9, "bold"), cursor="hand2")
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda _e: self.close())
 
-        desc = tk.Label(inner, text="Active processes with network connections:",
+        desc = tk.Label(inner, text="live download / upload per app (sampled I/O), updates every second:",
                         bg=BG_CARD, fg=FG_LABEL, font=(FONT_FAMILY, 7), anchor="w")
-        desc.pack(fill="x", pady=(0, 6))
+        desc.pack(fill="x", pady=(0, 4))
 
-        self.list_frame = tk.Frame(inner, bg=BG_SPEED_ROW, padx=8, pady=8)
+        self.list_frame = tk.Frame(inner, bg=BG_SPEED_ROW, padx=8, pady=6)
         self.list_frame.pack(fill="both", expand=True)
-        self._row_labels = []
-        self._last_rows: List[str] = []
+        # Column header, same widths as the data rows.
+        header = tk.Frame(self.list_frame, bg=BG_SPEED_ROW)
+        header.pack(fill="x", pady=(0, 2))
+        for key, width, anchor, _color in self.COLUMNS:
+            text = {"name": "PROCESS", "down": "\u2193 DOWNLOAD",
+                    "up": "\u2191 UPLOAD", "session": "SESSION",
+                    "conns": ""}[key]
+            tk.Label(header, text=text, bg=BG_SPEED_ROW, fg=FG_LABEL,
+                     font=("Consolas", 8, "bold"), width=width,
+                     anchor=anchor).pack(side="left", padx=(0, 2))
+        self._status_label = tk.Label(self.list_frame, text="", bg=BG_SPEED_ROW,
+                                      fg=FG_LABEL, font=("Consolas", 8), anchor="w")
+        self._rows = []
+        self._last_values = None
 
         self._refresh_list()
 
@@ -1566,7 +1620,7 @@ class AppUsageDashboard:
         self.window.geometry(f"+{x}+{y}")
         self.window.focus_force()
 
-        # Auto refresh while open
+        # Auto refresh while open — every second, so the numbers feel live.
         self._schedule_refresh()
 
     def _deferred_close(self) -> None:
@@ -1579,33 +1633,80 @@ class AppUsageDashboard:
 
     def _schedule_refresh(self) -> None:
         if self.window is not None and self.window.winfo_exists():
-            self._timer = self.parent.after(2500, self._tick_refresh)
+            self._timer = self.parent.after(1000, self._tick_refresh)
 
     def _tick_refresh(self) -> None:
-        self.widget.scanner.maybe_scan(force=True)
+        # Throttled connection scan (PROCESS_SCAN_INTERVAL); the live byte
+        # rates come from the widget's own per-second IO sampling.
+        self.widget.scanner.maybe_scan()
         self._refresh_list()
         self._schedule_refresh()
 
+    def _row_values(self) -> Optional[List[Tuple[str, ...]]]:
+        """Live per-app cell texts, or None when no app has traffic."""
+        rows = self.widget.proc_rows()
+        if not rows:
+            return None
+        out = []
+        for name, down_bps, up_bps, total_bytes, conns in rows:
+            out.append((shorten(name, 20),
+                        f"\u2193 {format_speed(down_bps)}",
+                        f"\u2191 {format_speed(up_bps)}",
+                        format_bytes(total_bytes),
+                        f"{conns}c" if conns else ""))
+        return out
+
+    def _make_row(self) -> Tuple[tk.Frame, List[tk.Label]]:
+        frame = tk.Frame(self.list_frame, bg=BG_SPEED_ROW)
+        labels: List[tk.Label] = []
+        for _key, width, anchor, _color_key in self.COLUMNS:
+            label = tk.Label(frame, text="", bg=BG_SPEED_ROW, fg=FG_TEXT,
+                             font=("Consolas", 8), width=width, anchor=anchor)
+            label.pack(side="left", padx=(0, 2))
+            labels.append(label)
+        return frame, labels
+
+    def _column_colors(self) -> List[str]:
+        """Resolve column colors at call time so a theme switch applies live."""
+        return [globals().get(color_key, FG_TEXT)
+                for _key, _width, _anchor, color_key in self.COLUMNS]
+
     def _refresh_list(self) -> None:
-        """Reuse labels: rebuilding the tree every 2.5s flickered and churned widgets."""
+        """Reuse row widgets: rebuilding them every second flickered and
+        churned objects. Only the cell texts (and the LIVE badge) change."""
         if self.window is None or not self.window.winfo_exists():
             return
-        rows = self.widget.scanner.snapshot() or ["No active network connections"]
-        if rows == self._last_rows:
+        live = getattr(self.widget, "_conn_state", "unknown")
+        try:
+            self._live_label.config(
+                text="\u25cf LIVE" if live != "offline" else "\u25cf OFFLINE",
+                fg=FG_OK if live != "offline" else FG_OFF)
+        except tk.TclError:
+            pass
+        values = self._row_values()
+        if values == self._last_values and values is not None:
             return
-        self._last_rows = list(rows)
-        while len(self._row_labels) < len(rows):
-            label = tk.Label(self.list_frame, text="", bg=BG_SPEED_ROW, fg=FG_TEXT,
-                             font=("Consolas", 8), anchor="w", justify="left")
-            label.pack(fill="x", pady=1)
-            self._row_labels.append(label)
-        for index, label in enumerate(self._row_labels):
-            if index < len(rows):
-                label.config(text=rows[index])
-                if not label.winfo_ismapped():
-                    label.pack(fill="x", pady=1)
+        self._last_values = values
+        colors = self._column_colors()
+        if values is None:
+            for frame, _labels in self._rows:
+                frame.pack_forget()
+            self._status_label.config(
+                text=f"  {self.widget.scanner.status or 'no active connections'}")
+            if not self._status_label.winfo_ismapped():
+                self._status_label.pack(fill="x", pady=1)
+            return
+        self._status_label.pack_forget()
+        while len(self._rows) < len(values):
+            self._rows.append(self._make_row())
+        for index, (frame, labels) in enumerate(self._rows):
+            if index < len(values):
+                for label, text, color in zip(labels, values[index], colors):
+                    label.config(text=text, fg=color)
+                if not frame.winfo_ismapped():
+                    frame.pack(fill="x", pady=1)
             else:
-                label.pack_forget()
+                frame.pack_forget()
 
 
 class ModernContextPanel:
@@ -1708,8 +1809,6 @@ class ModernContextPanel:
                   lambda: (w.sysload_var.set(not w.sysload_var.get()), w._on_toggle_sysload()))
         self._row(inner, "Compact taskbar mode", "ON" if w.compact_var.get() else "OFF",
                   lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
-        self._row(inner, "Speed graph", "ON" if w.graph_var.get() else "OFF",
-                  lambda: (w.graph_var.set(not w.graph_var.get()), w._on_toggle_graph()))
         self._row(inner, "Ping & status", "ON" if w.pingshow_var.get() else "OFF",
                   lambda: (w.pingshow_var.set(not w.pingshow_var.get()), w._on_toggle_ping()))
         self._row(inner, "Today's totals", "ON" if w.totals_var.get() else "OFF",
@@ -2091,7 +2190,9 @@ class SpeedWidget:
         self._net_info_last: float = 0.0
         # Per-process speed sampling (best-effort, sampled, not exact).
         self._proc_speed: Dict[str, Tuple[int, int]] = {}  # name -> (down_bps, up_bps)
+        self._proc_total: Dict[str, Tuple[int, int]] = {}  # name -> (down_bytes, up_bytes) session totals
         self._proc_io_last: Dict[int, Tuple[int, int]] = {}  # pid -> (last_recv_bytes, last_sent_bytes)
+        self._proc_speed_last = 0.0
         self.last_down = self.last_up = 0.0
         self._idle_ticks, self._faded, self._closing = 0, False, False
         self._last_system_sample = 0.0
@@ -2120,7 +2221,6 @@ class SpeedWidget:
         self._conn_state = "unknown"   # online / offline / unknown
         self._strip_items: List[int] = []
         self._status_dot: Optional[int] = None
-        self._graph_rect: Optional[Tuple[float, float, float, float]] = None
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
         self._suppress_bg_sync = False
@@ -2132,7 +2232,7 @@ class SpeedWidget:
             "down_icon": "\u2193", "up_icon": "\u2191",
             "down_value": "0 KB/s", "up_value": "0 KB/s",
             "cpu_badge": "CPU --", "ram_badge": "RAM --",
-            "ping_text": "--", "totals_text": "\u2193 0 B   \u2191 0 B",
+            "ping_text": "--", "totals_text": "\u21930B \u21910B",
         }
         self._current_colors: Dict[str, str] = {
             "down_icon": FG_DOWN, "up_icon": FG_UP,
@@ -2346,14 +2446,23 @@ class SpeedWidget:
         self.row_h = max(self._text_size("0 KB/s", self.font_value)[1],
                          self._text_size("\u2193", self.font_icon)[1],
                          self._text_size("CPU --", self.font_system)[1]) + pad_y
-        # v2.14.0: graph band + status strip metrics (DPI-aware).
-        self.graph_h = int(round(GRAPH_BAND_HEIGHT * self.ui_scale))
+        # v2.14.0: status strip metrics (DPI-aware).
         self.dot_r = max(2, int(round(STATUS_DOT_R * self.ui_scale)))
         self.strip_h = max(self._text_size("999 ms", self.font_system)[1] + 2,
                            2 * self.dot_r + 4)
-        self._ping_px = self._text_size("OFFLINE", self.font_system)[0]
+        self._ping_px = self._text_size("999 ms", self.font_system)[0]
+        # v2.15.0: compact totals sample — the old wide "↓ 999.99 GB   ↑ 999.99 GB"
+        # reservation made the card ~40px wider than the speed+badge content,
+        # which showed up as dead space between the speeds and CPU/RAM badges.
         self._totals_px = self._text_size(
-            "\u2193 999.99 GB   \u2191 999.99 GB", self.font_system)[0]
+            "\u2193999.9G \u2191999.9G", self.font_system)[0]
+        # v2.15.0: the strip no longer reserves its worst-case text. The
+        # reservation starts pessimistic (the samples above) so the very
+        # first paint can never clip, then _maybe_tighten_strip() re-fits it
+        # to the *actual* strip text — that is what removed the dead column
+        # between the readings and the CPU/RAM badges. Reset here (not in
+        # __init__) so a font change re-measures in the new metrics.
+        self._strip_px_actual: Optional[int] = None
         self.value_px = self._value_px_max
         self._recompute_width()
 
@@ -2376,13 +2485,6 @@ class SpeedWidget:
             return bool(self.sysload_var.get())
         return bool(self.config.get("show_sysload", True))
 
-    def _include_graph(self) -> bool:
-        if self.compact:
-            return False
-        if hasattr(self, "graph_var"):
-            return bool(self.graph_var.get())
-        return bool(self.config.get("show_graph", True))
-
     def _include_ping(self) -> bool:
         if self.compact:
             return False
@@ -2400,15 +2502,10 @@ class SpeedWidget:
     def _include_strip(self) -> bool:
         return not self.compact and (self._include_ping() or self._include_totals())
 
-    def _graph_pad(self) -> int:
-        return int(round(GRAPH_PAD * self.ui_scale))
-
     def _compute_card_height(self) -> int:
-        """Total card height: speed rows + optional graph band + status strip."""
+        """Total card height: speed rows + optional status strip."""
         rows = 1 if self.compact else 2
         height = rows * self.row_h
-        if self._include_graph():
-            height += self.graph_h + 2 * self._graph_pad()
         if self._include_strip():
             height += self.strip_h
         height += 2 * (self.border + CONTENT_PAD_Y)
@@ -2426,16 +2523,21 @@ class SpeedWidget:
             if self._include_sysload():
                 content += SEP_PAD + 1 + self.badge_px
         if self._include_strip():
-            # v2.14.0: the status strip (dot + ping left, totals right) must
-            # fit without clipping when the speed readings are short.
-            strip_w = 0
-            if self._include_ping():
-                strip_w += 2 * self.dot_r + 4 + self._ping_px
-            if self._include_totals():
-                strip_w += self._totals_px
+            # v2.15.0: prefer the measured width of the ACTUAL strip text; the
+            # worst-case samples are only the first-paint reservation.
+            actual = getattr(self, "_strip_px_actual", None)
+            if actual is not None:
+                strip_w = actual
+            else:
+                strip_w = 0
+                if self._include_ping():
+                    strip_w += 2 * self.dot_r + 4 + self._ping_px
+                if self._include_totals():
+                    strip_w += self._totals_px
+                if strip_w:
+                    strip_w += 4
             if strip_w:
-                strip_w += 4
-            content = max(content, strip_w)
+                content = max(content, strip_w)
         self.window_width = int(max(WINDOW_WIDTH,
                                     content + 2 * (self.border + CONTENT_PAD_X)))
 
@@ -2488,20 +2590,8 @@ class SpeedWidget:
                             self._current_colors["ram_badge"], "e")
             self._draw_separator(self._rows_bottom())
 
-        rows = 1 if self.compact else 2
-        # v2.14.0: in-card graph band geometry. The lines themselves are
-        # (re)drawn from the rolling history by _refresh_graph each tick.
-        if self._include_graph():
-            gx1 = float(self.border + CONTENT_PAD_X)
-            gx2 = float(self.window_width - self.border - CONTENT_PAD_X)
-            gy1 = float(self.border + CONTENT_PAD_Y + rows * self.row_h
-                        + self._graph_pad())
-            self._graph_rect = (gx1, gy1, gx2, gy1 + float(self.graph_h))
-        else:
-            self._graph_rect = None
-
         # v2.14.0: status strip — connection dot + ping on the left, today's
-        # totals on the right, in one slim line under the graph.
+        # totals on the right, in one slim line under the rows.
         if self._include_strip():
             card_h = self._compute_card_height()
             cy = card_h - self.border - CONTENT_PAD_Y - self.strip_h / 2.0
@@ -2663,55 +2753,6 @@ class SpeedWidget:
         rows = 1 if self.compact else 2
         return self.border + CONTENT_PAD_Y + rows * self.row_h + 2
 
-    def _graph_bg_color(self) -> str:
-        return "#E2E2E2" if getattr(self, "_high_contrast", False) else BG_SPEED_ROW
-
-    def _draw_graph_bg(self) -> None:
-        """Paint the rounded band the in-card sparkline sits on (card layer,
-        so it fades together with the card via the transparency slider)."""
-        if self.bg_canvas is None:
-            return
-        self.bg_canvas.delete("graph_bg")
-        rect = getattr(self, "_graph_rect", None)
-        if not rect or not self._include_graph():
-            return
-        x1, y1, x2, y2 = rect
-        items = self._rounded_rect(self.bg_canvas, x1, y1, x2, y2, 3.0,
-                                   self._graph_bg_color())
-        for item in items:
-            self.bg_canvas.itemconfig(item, tags="graph_bg")
-
-    def _refresh_graph(self) -> None:
-        """Redraw the two in-card sparklines (download/upload) each tick."""
-        if self.canvas is None or not self._include_graph():
-            return
-        self.canvas.delete("graph")
-        rect = getattr(self, "_graph_rect", None)
-        if not rect:
-            return
-        down, up = self._spark_down, self._spark_up
-        x1, y1, x2, y2 = rect
-        w, h = x2 - x1, y2 - y1
-        if w <= 4 or h <= 4:
-            return
-        peak = max([1.0] + list(down) + list(up))
-        n = len(down)
-        if n < 2:
-            return
-
-        def pts(series: List[float]) -> List[Tuple[float, float]]:
-            out: List[Tuple[float, float]] = []
-            for i, v in enumerate(series):
-                frac = min(1.0, max(0.0, v) / peak)
-                out.append((x1 + (i / (n - 1)) * w,
-                            y2 - 1 - frac * (h - 2)))
-            return out
-
-        self.canvas.create_line(pts(down), fill=FG_DOWN, width=1,
-                                smooth=True, tags="graph")
-        self.canvas.create_line(pts(up), fill=FG_UP, width=1,
-                                smooth=True, tags="graph")
-
     def _dot_color(self) -> str:
         if getattr(self, "_high_contrast", False):
             return {"online": "#107C10",
@@ -2737,9 +2778,60 @@ class SpeedWidget:
                 except tk.TclError:
                     pass
         if self._include_totals():
-            text = (f"\u2193 {format_bytes(self.totals.daily_down)}"
-                    f"   \u2191 {format_bytes(self.totals.daily_up)}")
-            self._set_text("totals_text", text, FG_DIM)
+            # v2.15.0: compact totals ("↓1.2G ↑340M") — the wide format was
+            # the reason the card stretched wider than its core content.
+            # While offline the red OFFLINE label replaces the totals (the
+            # card width only reserves "999 ms" for the ping).
+            if self._conn_state == "offline" and self._include_ping():
+                self._set_text("totals_text", "", FG_DIM)
+            else:
+                text = (f"\u2193{format_bytes_compact(self.totals.daily_down)}"
+                        f" \u2191{format_bytes_compact(self.totals.daily_up)}")
+                self._set_text("totals_text", text, FG_DIM)
+        # Re-fit the card width to what the strip actually shows — this is
+        # what keeps the CPU/RAM badges snug against the readings.
+        self._maybe_tighten_strip()
+
+    def _measure_strip_actual(self) -> int:
+        """Pixel width the strip needs for its CURRENT texts.
+
+        Mirrors the reservation formula in _recompute_width(), but measured
+        from the real ping/totals strings instead of the worst-case samples.
+        """
+        w = 0
+        if self._include_ping():
+            text = self._current_texts.get("ping_text", "") or "--"
+            w += 2 * self.dot_r + 4 + self._text_size(text, self.font_system)[0]
+        if self._include_totals():
+            text = self._current_texts.get("totals_text", "")
+            if text:
+                w += self._text_size(text, self.font_system)[0]
+        if w:
+            w += 4
+        return w
+
+    def _maybe_tighten_strip(self) -> None:
+        """Fit the card width to the actual strip text, with hysteresis.
+
+        v2.15.0: the strip used to reserve its worst case ("999 ms" +
+        "↓999.9G ↑999.9G"), which made the card ~30px wider than the
+        speed+badge content — the "extra gap between CPU/RAM and the
+        speeds" the user reported. The reservation now follows the real
+        text: it grows immediately (clipping would be worse) but shrinks
+        only when it is >=8px too wide, so a ping flipping between "9 ms"
+        and "14 ms" cannot make the card edge jitter every second.
+        """
+        if not self._include_strip() or self._closing:
+            return
+        needed = self._measure_strip_actual()
+        current = getattr(self, "_strip_px_actual", None)
+        if current is not None:
+            if needed > current:
+                pass                      # grow: relayout right away
+            elif current - needed < 8:
+                return                   # close enough — no churn
+        self._strip_px_actual = needed
+        self._relayout()
 
     def _link_up(self) -> bool:
         """True when at least one non-loopback interface has link."""
@@ -2798,7 +2890,6 @@ class SpeedWidget:
         if self.bg_window is not None and self.bg_canvas is not None:
             self.bg_canvas.config(width=self.window_width, height=height)
             self._draw_card(self.window_width, height)
-            self._draw_graph_bg()
             self._draw_separator(self._rows_bottom())
         self.root.update_idletasks()
         self._raise_windows(force=True)
@@ -2816,7 +2907,6 @@ class SpeedWidget:
         if self._include_sysload():
             self._update_system_labels()
         self._update_status_strip()
-        self._refresh_graph()
         if self.locked:
             self._enforce_locked_position()
 
@@ -2855,9 +2945,6 @@ class SpeedWidget:
         self.compact_var = tk.BooleanVar(value=self.compact)
         self.menu.add_checkbutton(label="Compact taskbar mode", variable=self.compact_var,
                                    command=self._on_toggle_compact, selectcolor=FG_CHECK)
-        self.graph_var = tk.BooleanVar(value=bool(self.config.get("show_graph", True)))
-        self.menu.add_checkbutton(label="Show speed graph", variable=self.graph_var,
-                                   command=self._on_toggle_graph, selectcolor=FG_CHECK)
         self.pingshow_var = tk.BooleanVar(value=bool(self.config.get("show_ping", True)))
         self.menu.add_checkbutton(label="Show ping & status", variable=self.pingshow_var,
                                    command=self._on_toggle_ping, selectcolor=FG_CHECK)
@@ -2997,10 +3084,6 @@ class SpeedWidget:
     def _on_toggle_compact(self) -> None:
         self.compact = bool(self.compact_var.get())
         self.config.set("compact", self.compact, save=True)
-        self._refresh_layout()
-
-    def _on_toggle_graph(self) -> None:
-        self.config.set("show_graph", bool(self.graph_var.get()), save=True)
         self._refresh_layout()
 
     def _on_toggle_ping(self) -> None:
@@ -3378,52 +3461,75 @@ class SpeedWidget:
             info["wifi"] = "--"
         self._net_info = info
 
-    def _sample_proc_speed(self) -> None:
-        """Best-effort per-process network speed sampling.
+    def proc_rows(self, limit: int = 8) -> List[Tuple[str, int, int, int, int]]:
+        """Live per-app traffic rows for the App Usage Dashboard.
 
-        Exact per-process bandwidth needs ETW (admin + complex). Instead we
-        sample each process's cumulative IO byte counters (``io_read_bytes``
-        and ``io_write_bytes`` approximate network+disk IO; for network-heavy
-        apps they correlate well) and derive a bytes/sec delta. This is a
-        *sampled approximation*, not a precise per-process speed — see Known
-        Limitations in the README. Runs on the tick thread, cheap because we
-        only scan the top-N connection holders from the ProcessScanner.
+        Each row: ``(app name, down_bps, up_bps, session_total_bytes, conns)``
+        sorted by current activity so the busiest app is always on top.
+        """
+        rows: List[Tuple[str, int, int, int, int]] = []
+        for name, (d, u) in self._proc_speed.items():
+            td, tu = self._proc_total.get(name, (0, 0))
+            rows.append((name, d, u, td + tu, self.scanner.counts.get(name, 0)))
+        rows.sort(key=lambda r: r[1] + r[2], reverse=True)
+        return rows[:limit]
+
+    def _sample_proc_speed(self) -> None:
+        """Live per-app download/upload rates for the App Usage Dashboard.
+
+        v2.15.0: previously this only sampled the top connection holders and
+        fed a static tooltip list, so the dashboard showed nothing live. Now
+        every running process's cumulative IO counters are diffed once per
+        tick into per-app rates + session totals, keyed on executable name.
+
+        Exact per-process *network* bandwidth would need ETW (admin + complex);
+        ``io_read_bytes`` / ``io_write_bytes`` approximate network+disk IO and
+        track network-heavy apps well — a *sampled approximation*, documented
+        as such in the README. PIDs are aggregated by process name so a
+        multi-process app (chrome, firefox…) shows one live row.
         """
         try:
             now = time.monotonic()
-            rows = self.scanner.snapshot()
-            names = []
-            for row in rows:
-                # rows look like "  chrome.exe                12 conn"
-                stripped = row.strip()
-                if not stripped or stripped.startswith("+") or "conn" not in stripped:
-                    continue
-                parts = stripped.split()
-                if parts:
-                    names.append(parts[0])
-            if not names:
-                self._proc_speed.clear()
-                return
             result: Dict[str, Tuple[int, int]] = {}
-            for proc in psutil.process_iter(attrs=["pid", "name"]):
+            totals: Dict[str, Tuple[int, int]] = {}
+            last = getattr(self, "_proc_speed_last", 0.0)
+            dt = max(0.001, now - last) if last else 0.0
+            for proc in psutil.process_iter(attrs=["pid", "name", "io_counters"]):
                 try:
-                    pname = proc.info["name"] or ""
-                    if not any(pname.startswith(n) or n in pname for n in names):
+                    io = proc.info["io_counters"]
+                    if io is None:
                         continue
-                    io = proc.io_counters()
                     pid = proc.pid
-                    last = self._proc_io_last.get(pid)
+                    name = proc.info["name"] or f"pid {pid}"
+                    prev = self._proc_io_last.get(pid)
                     self._proc_io_last[pid] = (io.read_bytes, io.write_bytes)
-                    if last is None:
+                    if prev is None or dt <= 0.0:
                         continue
-                    dt = max(0.001, now - getattr(self, "_proc_speed_last", now))
-                    down_bps = max(0, io.read_bytes - last[0]) / dt
-                    up_bps = max(0, io.write_bytes - last[1]) / dt
-                    prev = result.get(pname, (0, 0))
-                    result[pname] = (int(prev[0] + down_bps), int(prev[1] + up_bps))
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    d_bytes = max(0, io.read_bytes - prev[0])
+                    u_bytes = max(0, io.write_bytes - prev[1])
+                    if d_bytes == 0 and u_bytes == 0:
+                        continue
+                    pd, pu = result.get(name, (0, 0))
+                    result[name] = (pd + int(d_bytes / dt), pu + int(u_bytes / dt))
+                    td, tu = totals.get(name, (0, 0))
+                    totals[name] = (td + d_bytes, tu + u_bytes)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError):
                     continue
+            # Drop processes that exited so the maps do not grow forever.
+            if len(self._proc_io_last) > 1024:
+                alive = set()
+                for proc in psutil.process_iter(attrs=["pid"]):
+                    try:
+                        alive.add(proc.pid)
+                    except psutil.NoSuchProcess:
+                        continue
+                for pid in list(self._proc_io_last):
+                    if pid not in alive:
+                        del self._proc_io_last[pid]
             self._proc_speed = result
+            for name, (d, u) in totals.items():
+                td, tu = self._proc_total.get(name, (0, 0))
+                self._proc_total[name] = (td + d, tu + u)
             self._proc_speed_last = now
         except Exception:
             log.debug("per-process speed sample failed", exc_info=True)
@@ -3691,7 +3797,6 @@ class SpeedWidget:
             self.totals.note_speed(down, up)
             # Feed the rolling sparkline history (bytes/s -> keep raw).
             self._sparkline_push(down_bytes, up_bytes)
-            self._refresh_graph()
             self._refresh_labels(down, up)
             self._update_idle_state(down, up)
         except Exception:
@@ -3722,7 +3827,6 @@ class SpeedWidget:
                 self._high_contrast = hc
                 self._card_shapes = []
                 self._draw_card(self._card_w, self._card_h)
-                self._draw_graph_bg()
             self._enforce_taskbar_dock()
             self._raise_windows()
             if self.bg_window is not None and not self._suppress_bg_sync:

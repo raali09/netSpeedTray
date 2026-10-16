@@ -64,6 +64,22 @@ def format_bytes(total: float) -> str:
     return f"{total:.2f} PB"
 
 
+def format_bytes_compact(total: float) -> str:
+    """Ultra-compact byte total for the widget's status strip.
+
+    v2.15.0: the strip used the wide ``format_bytes`` text ("999.99 GB"),
+    whose reserved width stretched the card well past the speed + badge
+    content. ``1.2G`` / ``340M`` / ``872K`` keeps the card narrow.
+    """
+    value = max(0.0, float(total))
+    for suffix, threshold in (("T", 1024 ** 4), ("G", 1024 ** 3),
+                              ("M", 1024 ** 2), ("K", 1024)):
+        if value >= threshold:
+            scaled = value / threshold
+            return f"{scaled:.0f}{suffix}" if scaled >= 100 else f"{scaled:.1f}{suffix}"
+    return f"{int(value)}B"
+
+
 def format_duration(seconds: float) -> str:
     """Compact ``Hh MMm`` / ``Mm SSs`` / ``Ss`` duration."""
     seconds = int(max(0, seconds))

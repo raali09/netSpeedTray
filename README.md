@@ -11,7 +11,25 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
-## What's new in 2.14.0
+## What's new in 2.15.0
+
+The **"Live & Compact"** release — built directly from user feedback on 2.14.0,
+still zero new dependencies:
+
+- **Live per-app upload/download** — the *App Network Usage* dashboard now
+  shows every app's live download rate (cyan), live upload rate (amber),
+  session total and connection count, refreshed **every second**, with a green
+  `● LIVE` badge. The old dashboard only listed connection counts.
+- **No chart below the card** — the in-card speed graph was removed at user
+  request (the widget is a compact meter; the 60-second chart still lives in
+  the hover tooltip).
+- **Smaller card** — tighter row padding plus a slimmer status strip: the card
+  is ~35% shorter and its width now follows the *actual* ping/totals text
+  (with an 8px hysteresis so the edge never jitters), so the extra gap that
+  sat between the speed readings and the CPU/RAM badges is gone. Today's
+  totals render compactly (`↓1.2G ↑335M`).
+
+## What was new in 2.14.0
 
 The **"Modern Glass"** release — the card itself gets a visual and information
 upgrade, with no new dependencies:
@@ -19,16 +37,14 @@ upgrade, with no new dependencies:
 - **Modern Midnight theme** (new default) — deeper glass-navy card, brighter
   cyan/amber readings, green/red connection colors. The old look is one click
   away: right-click → *Theme* → *Classic*.
-- **Speed graph in the card** — a live dual-line sparkline of download/upload
-  now lives directly under the readings (no hover needed).
 - **Status strip** — `● 12 ms` connection dot + live latency on the left,
-  today's totals (`↓ 3.48 GB ↑ 876 MB`) on the right.
+  today's totals on the right.
 - **Explicit offline detection** — when the internet goes down the border ring,
   dot and ping text turn red with an `OFFLINE` label — clearly different from
   *no traffic*, which simply reads `0 KB/s` with a green dot. Detection uses
   two signals: interface link state plus failed probes to Cloudflare/Google
   DNS with a fast retry cadence, so recovery is noticed within seconds.
-- Each new element (graph, ping, totals) can be toggled individually from the
+- Each element (ping, totals) can be toggled individually from the
   right-click menu; compact taskbar mode stays a single tight row.
 
 ## What was new in 2.13.0
@@ -99,9 +115,10 @@ Prefer to run from source? See below.
   recent up/down speed, your **local & public IP**, **Wi-Fi signal strength**, **ping to a
   configurable target**, and the processes holding the most network connections.
 - **Network adapter picker** — all adapters combined (total) or one interface.
-- **Per-process network speed** — a separate dashboard lists every process with live
-  download/upload speed sampled from its IO counters. (Requires running as administrator to
-  see other users' / system processes; see *Troubleshooting*.)
+- **Per-process network speed** — a separate dashboard lists every app with live
+  download/upload rate, session total and connection count, sampled from
+  `psutil`'s per-IO counters every second (2.15.0). (Requires running as
+  administrator to see other users' / system processes; see *Troubleshooting*.)
 - **High-contrast mode** — when Windows High Contrast is on, the card recolours itself to
   match the accessibility palette so it stays legible.
 - **Adaptive corner radius** — optional appearance setting that lets the card's rounded
@@ -247,9 +264,8 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 | `x`, `y` | Saved window position |
 | `adapter` | Adapter name, or `__all__` for the combined total |
 | `show_sysload` | Show the CPU / RAM badges |
-| `show_graph` | Show the in-card download/upload sparkline (v2.14.0) |
 | `show_ping` | Show the connection dot + latency in the status strip (v2.14.0) |
-| `show_totals` | Show today's traffic totals in the status strip (v2.14.0) |
+| `show_totals` | Show today's traffic totals in the status strip (v2.14.0, compact since 2.15.0) |
 | `theme` | `midnight` (modern, default) or `classic` (the 2.13 look) |
 | `alert_mbps` | Highlight the readings above this speed, `0` turns it off |
 | `check_updates_on_start` | Silently check GitHub for a newer release on launch |

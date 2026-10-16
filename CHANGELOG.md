@@ -4,6 +4,38 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0] - 2026-10-16
+
+The "Live & Compact" release — direct response to user feedback on 2.14.0:
+per-app traffic is now shown **live**, the speed chart was removed from below
+the card, and the whole widget is noticeably smaller.
+
+### Added
+- **Live per-app upload/download dashboard** — *App Network Usage* now shows,
+  for every running app: the live download rate (cyan), the live upload rate
+  (amber), the session total and the active connection count — refreshed
+  **every second** with a green `● LIVE` badge that flips to red `● OFFLINE`
+  with the connection state. The old dashboard only listed static connection
+  counts every 2.5 s. The hover tooltip keeps its top-3 live app rows.
+
+### Changed
+- **Compact card** — the row padding was tightened and the status-strip
+  reservation slimmed, so the card is ~35% shorter than 2.14.0 and no longer
+  stretches wider than its content: the strip width now follows the *actual*
+  ping/totals text (growing instantly, shrinking only past an 8px hysteresis
+  so the card edge never jitters), which removes the dead space that used to
+  sit between the speed readings and the CPU/RAM badges. Today's totals
+  render in a compact form (`↓1.2G ↑335M`); while offline, the totals yield
+  their spot to the red `OFFLINE` label.
+- The sparkline history (60 s) keeps feeding the **hover tooltip chart** — the
+  graph moved out of the card, it did not disappear.
+
+### Removed
+- **In-card speed graph** — per user request, the speed chart that 2.14.0 drew
+  below the readings inside the card was removed (it made the widget taller);
+  the menu entry *Show speed graph* and the `show_graph` config key are gone
+  with it (existing configs are migrated, `ui_version` 24).
+
 ## [2.14.0] - 2026-10-16
 
 The "Modern Glass" release — a visual and information upgrade for the card
