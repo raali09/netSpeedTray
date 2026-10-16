@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // آزمون سرعت نیاز به پاسخ خام و بدون کش/فشرده‌سازی دارد.
-  // (هدرهای no-store در خود API routeها تنظیم می‌شوند.)
+  // خروجی standalone — برای اجرای سرور داخلی داخل ویجت الکترون
+  // (`node .next/standalone/server.js` پس از build)
+  output: "standalone",
   reactStrictMode: false,
 };
 

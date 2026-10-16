@@ -1,0 +1,46 @@
+# پیکربندی electron-builder — ساخت ویجت ویندوزی (exe)
+# خروجی‌ها در پوشهٔ release/ ساخته می‌شوند:
+#   SpeedMeter-Setup-x.y.z.exe      (نصب‌شوندهٔ NSIS)
+#   SpeedMeter-Portable-x.y.z.exe   (بدون نیاز به نصب)
+
+appId: ir.speedmeter.widget
+productName: Speed Meter Widget
+copyright: Copyright © Speed Meter Project
+
+directories:
+  output: release
+  buildResources: build
+
+# فقط لایهٔ الکترون داخل asar بسته می‌شود؛ سرور Next (استandalone)
+# به‌صورت «extraResources» با فایل‌های واقعی روی دیسک قرار می‌گیرد
+# چون باید با fork اجرا شود.
+files:
+  - electron/**/*
+
+extraResources:
+  # سرور Next یک سطح در «inner» قرار دارد چون electron-builder
+  # پوشهٔ node_modules ریشهٔ منبع را همیشه فیلتر می‌کند.
+  - from: build/server-bundle
+    to: app-server
+  - from: build/icon.png
+    to: icon.png
+
+asar: true
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  artifactName: SpeedMeter-Setup-${version}.${ext}
+
+portable:
+  artifactName: SpeedMeter-Portable-${version}.${ext}

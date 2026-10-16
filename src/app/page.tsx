@@ -11,17 +11,18 @@ import { SpeedTestCard, type TestOutcome } from "@/components/speedmeter/SpeedTe
 import { LiveMonitorCard } from "@/components/speedmeter/LiveMonitorCard";
 import { ConnectionInfoCard } from "@/components/speedmeter/ConnectionInfoCard";
 import { HistoryCard } from "@/components/speedmeter/HistoryCard";
+import { WidgetView } from "@/components/speedmeter/WidgetView";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { HistoryItem } from "@/lib/types";
 import { faFormat } from "@/lib/speedtest";
-import { Gauge as GaugeIcon, Wifi, WifiOff, RadioTower, Radar, Heart } from "lucide-react";
+import { Gauge as GaugeIcon, Wifi, WifiOff, RadioTower, Radar, Heart, PictureInPicture2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const LS_KEY = "speedmeter:history";
 const HISTORY_CAP = 20;
 // نسخهٔ برنامه — با package.json هماهنگ نگه دارید
-const APP_VERSION = "۱٫۰٫۰";
+const APP_VERSION = "۱٫۱٫۰";
 
 function loadLocalHistory(): HistoryItem[] {
   try {
@@ -53,11 +54,25 @@ export default function Home() {
   const { toast } = useToast();
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  // حالت ویجت (/?widget=1): نمای فشرده برای پنجرهٔ کوچک الکترون
+  const [widgetMode, setWidgetMode] = useState(false);
+  // پل الکترون (فقط داخل ویجت ویندوزی وجود دارد)
+  const [desktop, setDesktop] = useState(false);
+
+  useEffect(() => {
+    try {
+      setWidgetMode(new URLSearchParams(window.location.search).has("widget"));
+      setDesktop(Boolean(window.speedmeter));
+    } catch {
+      /* دسترسی به window ناموفق — نادیده بگیر */
+    }
+  }, []);
 
   // بارگذاری اولیه: نسخهٔ محلی + نسخهٔ سرور در یک ادامهٔ غیرهمگام ادغام
   // می‌شوند تا setState همگام داخل بدنهٔ effect رخ ندهد. اگر سرور پاسخ ندهد،
   // همان نسخهٔ محلی (آینهٔ localStorage) نمایش داده می‌شود.
   useEffect(() => {
+    if (widgetMode) return; // در حالت ویجت، تاریخچه لازم نیست
     let cancelled = false;
     const ctl = new AbortController();
     const timeout = setTimeout(() => ctl.abort(), 5000);
@@ -90,13 +105,14 @@ export default function Home() {
       ctl.abort();
       clearTimeout(timeout);
     };
-  }, []);
+  }, [widgetMode]);
 
   // آینهٔ محلی: با هر تغییر تاریخچه در localStorage نوشته می‌شود (برای
   // مشاهده در قطعی) — نوشتن در سیستم بیرونی، کارِ مجازِ effect است.
+  // در حالت ویجت نوشتن انجام نمی‌شود تا تاریخچهٔ محلی کاربر پاک نشود.
   useEffect(() => {
-    persistLocal(history);
-  }, [history]);
+    if (!widgetMode) persistLocal(history);
+  }, [history, widgetMode]);
 
   const handleResult = useCallback(async (outcome: TestOutcome) => {
     const optimistic: HistoryItem = {
@@ -159,6 +175,9 @@ export default function Home() {
       });
     }
   }, [toast]);
+
+  // حالت ویجت: نمای فشرده برای پنجرهٔ کوچکِ همیشه‌بالای صفحه (الکترون)
+  if (widgetMode) return <WidgetView />;
 
   return (
     <div className="min-h-screen flex flex-col app-bg">
@@ -224,6 +243,19 @@ export default function Home() {
               </>
             )}
           </div>
+
+          {desktop && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => window.speedmeter?.openWidget()}
+              className="shrink-0"
+              title="نمایش ویجت همیشه‌بالای صفحه"
+            >
+              <PictureInPicture2 className="size-3.5" aria-hidden />
+              <span className="hidden sm:inline">ویجت</span>
+            </Button>
+          )}
         </div>
       </header>
 

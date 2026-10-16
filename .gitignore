@@ -13,7 +13,10 @@
 /out/
 
 # production
-/build
+/release/
+
+# بستهٔ سرور داخلی (خروجی scripts/postbuild.mjs)
+/build/server-bundle/
 
 # misc
 .DS_Store

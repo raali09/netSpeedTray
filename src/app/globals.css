@@ -197,3 +197,11 @@
 main .grid > * {
   min-width: 0;
 }
+
+/* ویجت دسکتاپ (الکترون) — ناحیهٔ کشیدن پنجرهٔ بدون قاب */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
