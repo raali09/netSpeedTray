@@ -53,6 +53,31 @@ def format_speed(value: float) -> str:
     return f"{kb:.0f} KB/s"
 
 
+def format_speed_live(value: float) -> str:
+    """Per-app live rate, always named in KB/s / MB/s (v2.17.0).
+
+    The card's compact :func:`format_speed` rounds sub-0.5 KB/s traffic to
+    ``0 KB/s`` and KB values to whole numbers — the right trade-off on the
+    narrow taskbar card, but in the per-app *live* dashboard it made
+    lightly-active programs (≈100–500 B/s) read as dead and coarse-grained
+    integers hide small movements. This variant always keeps one decimal
+    and always names the unit, so ``120 B/s`` shows as ``0.1 KB/s``,
+    ``235000 B/s`` as ``229.5 KB/s`` and ``2350000 B/s`` as ``2.2 MB/s``.
+    """
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        val = 0.0
+    kb = max(0.0, val) / 1024.0
+    if kb >= 1023.95 * 1024.0:
+        gb = kb / (1024.0 * 1024.0)
+        return f"{gb:.1f} GB/s" if gb < 100 else f"{gb:.0f} GB/s"
+    if kb >= 1023.95:
+        mb = kb / 1024.0
+        return f"{mb:.1f} MB/s" if mb < 100 else f"{mb:.0f} MB/s"
+    return f"{kb:.1f} KB/s"
+
+
 def format_bytes(total: float) -> str:
     """Human-readable byte total with a sensible unit."""
     if total < 1024:

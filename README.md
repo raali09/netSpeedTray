@@ -11,7 +11,27 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
-## What's new in 2.16.0
+## What's new in 2.17.0
+
+The **"Steady Glass"** release — three direct user requests, zero new
+dependencies:
+
+- **Locked card no longer trembles on the taskbar** — the widget used to jump
+  up and down a few pixels every second while locked on the taskbar. A single
+  position arbiter now runs per tick (the saved position wins while locked;
+  the dock keeps the card glued otherwise), a 2px deadband absorbs the ±1px
+  DPI rounding error, and locking a docked card saves the dock-ideal position.
+- **Per-app live rates always in KB/s / MB/s** — the app-usage dashboard and
+  the tooltip's top-app rows now name the unit and keep one decimal
+  (`0.1 KB/s`, `229.5 KB/s`, `2.2 MB/s`), so lightly-active programs no
+  longer read as a dead `0 KB/s`.
+- **Modern frosted-glass card, same size** — the card surface is a vertical
+  sheen→top→bottom gradient rendered with corner-clipped scanlines (a
+  brighter top band acts as the glass highlight). Both themes ship their own
+  stops; High-Contrast stays flat. **Geometry is untouched** — same width,
+  same height, same fonts; only the paint changed.
+
+## What was new in 2.16.0
 
 The **"Minimal Four"** release — per user request, the card shows **exactly
 four values and nothing else**: download speed, upload speed, CPU and RAM.

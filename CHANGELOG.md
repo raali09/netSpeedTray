@@ -4,6 +4,55 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0] - 2026-10-16
+
+The "Steady Glass" release — three direct user requests: the locked card no
+longer trembles on the taskbar, per-app live rates are always named in
+KB/s / MB/s, and the card gets a modern frosted-glass repaint at the *exact*
+same size.
+
+### Fixed
+- **Locked-on-taskbar bounce** — while the widget was locked and docked on the
+  taskbar it could jump up and down a few pixels every second. Root cause: two
+  independent per-tick movers. `_enforce_taskbar_dock()` re-aligned the card to
+  the live taskbar rectangle and then `_enforce_locked_position()` moved it back
+  to the saved config position — whenever the two targets disagreed by even a
+  pixel (taskbar rect drift, DPI rounding, a stale saved position), each tick
+  produced two opposing moves. The fix is architectural:
+  - a **single position arbiter** (`_enforce_position`) runs per tick — when
+    locked, the saved position wins and dock re-alignment is skipped entirely;
+    otherwise dock enforcement keeps the card glued to the taskbar;
+  - a **2px deadband** (`POSITION_DEADBAND`) on both enforcers absorbs the
+    ±1px `geometry()` → `winfo_y()` round-trip error that per-monitor DPI
+    scaling (125% / 150%) introduces, so no mover re-issues the same move every
+    tick;
+  - locking a docked card now saves the **dock-ideal** position (not whatever
+    ±1px value the last round-trip produced), so the lock target and the dock
+    target can never disagree;
+  - dock enforcement reads the authoritative `window_width` / `_card_h` instead
+    of `winfo_width()/winfo_height()`, which could lag one update behind during
+    a relayout and feed a stale height into the clamp.
+
+### Changed
+- **Per-app live rates always in KB/s / MB/s** — the app-usage dashboard and the
+  tooltip's top-app rows now use `format_speed_live`: the unit is always named
+  and one decimal is always kept, so lightly-active programs read `0.1 KB/s`
+  instead of a dead `0 KB/s`, and `235000 B/s` reads `229.5 KB/s`. The taskbar
+  card keeps the compact integer formatting (its width is reserved for
+  `999 MB/s`-wide samples).
+
+### Visual
+- **Glass card repaint (same size)** — the card surface is now a vertical
+  3-stop gradient (`GLASS_SHEEN` → `GLASS_TOP` → `GLASS_BOTTOM`) rendered with
+  1px scanlines that are horizontally inset inside the corner arcs, so the
+  frosted look follows the rounded silhouette exactly. A brighter top band
+  acts as the glass sheen; both themes (Midnight / Classic) ship their own
+  stops and High-Contrast mode stays flat. **Geometry is untouched** — same
+  width formula, same `2·row + borders` height, same fonts and paddings; only
+  the paint changed. Shape reuse (recolor-in-place) is preserved so theme
+  switches and the lock flash do not flicker, and stale shapes are now deleted
+  on count changes (no canvas item leaks across compact toggles).
+
 ## [2.16.0] - 2026-10-16
 
 The "Minimal Four" release — per user request, the card now shows **exactly

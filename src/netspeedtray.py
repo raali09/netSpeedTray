@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 import logging
+import math
 import os
 import socket
 import subprocess
@@ -95,6 +96,11 @@ TASKBAR_CACHE_TTL = 2.0
 ZORDER_INTERVAL_ACTIVE = 0.15
 ZORDER_INTERVAL_IDLE = 0.75
 ZORDER_IDLE_GRACE = 5.0
+# v2.17.0: position enforcement deadband (px). Tk's ``geometry()`` ->
+# ``winfo_y()`` round-trip can be off by a pixel on scaled (125%/150%)
+# monitors; comparing positions exactly made every tick re-issue the same
+# move, and together with the dock enforcer produced the locked-card bounce.
+POSITION_DEADBAND = 2
 
 BG_CARD = "#101820"
 BG_SPEED_ROW = "#1B2733"
@@ -110,6 +116,14 @@ FG_ALERT = "#F27585"
 FG_LOCK_FLASH = "#F0B45A"
 FG_DIM = "#AAB5C1"
 FG_CHECK = "#55C7F3"
+
+# --- Glass card surface (v2.17.0) --------------------------------------------
+# The card is painted as a vertical 3-stop gradient (sheen -> top -> bottom)
+# clipped to the rounded shape with 1px scanlines: a modern frosted-glass look
+# that keeps the exact same card geometry (no size change, only paint).
+GLASS_SHEEN = "#2A3A49"
+GLASS_TOP = "#18242F"
+GLASS_BOTTOM = "#0B1219"
 
 BG_TRANSPARENT_KEY = "#0A0B0C"
 FG_TRANSPARENT_KEY = "#0D0E0F"
@@ -144,6 +158,9 @@ THEMES: Dict[str, Dict[str, str]] = {
         "SHADOW_COLOR": "#071019",
         "FG_OK": "#57C785",
         "FG_OFF": "#F27585",
+        "GLASS_SHEEN": "#2A3A49",
+        "GLASS_TOP": "#18242F",
+        "GLASS_BOTTOM": "#0B1219",
     },
     "midnight": {
         "BG_CARD": "#0F1826",
@@ -164,6 +181,9 @@ THEMES: Dict[str, Dict[str, str]] = {
         "SHADOW_COLOR": "#050B12",
         "FG_OK": "#3DDC97",
         "FG_OFF": "#FF5C6C",
+        "GLASS_SHEEN": "#3A5473",
+        "GLASS_TOP": "#1B2B42",
+        "GLASS_BOTTOM": "#0A111E",
     },
 }
 THEMES_ORDER = ("midnight", "classic")
@@ -691,7 +711,7 @@ class Config:
 # existing ``netspeedtray.format_speed`` style access keeps working.
 from net_speed.utils import (
     list_adapters, adapter_status_map,
-    format_speed, format_bytes, format_bytes_compact, format_duration, shorten,
+    format_speed, format_speed_live, format_bytes, format_bytes_compact, format_duration, shorten,
     compare_versions, _maybe_int,
 )
 
@@ -1655,8 +1675,8 @@ class AppUsageDashboard:
         out = []
         for name, down_bps, up_bps, total_bytes, conns in rows:
             out.append((shorten(name, 20),
-                        f"\u2193 {format_speed(down_bps)}",
-                        f"\u2191 {format_speed(up_bps)}",
+                        f"\u2193 {format_speed_live(down_bps)}",
+                        f"\u2191 {format_speed_live(up_bps)}",
                         format_bytes(total_bytes),
                         f"{conns}c" if conns else ""))
         return out
@@ -2618,6 +2638,64 @@ class SpeedWidget:
     def _window_alpha(self) -> float:
         return max(MIN_OPACITY, min(MAX_OPACITY, float(self.opacity)))
 
+    @staticmethod
+    def _lerp_hex(c1: str, c2: str, t: float) -> str:
+        """Linear interpolation between two ``#RRGGBB`` colors."""
+        r1, g1, b1 = (int(c1[i:i + 2], 16) for i in (1, 3, 5))
+        r2, g2, b2 = (int(c2[i:i + 2], 16) for i in (1, 3, 5))
+        return "#{:02X}{:02X}{:02X}".format(
+            int(round(r1 + (r2 - r1) * t)),
+            int(round(g1 + (g2 - g1) * t)),
+            int(round(b1 + (b2 - b1) * t)))
+
+    def _glass_fills(self, rows: int) -> List[str]:
+        """Vertical 3-stop ramp for the glass surface (top -> bottom).
+
+        The first ~22% of the card blends from a soft sheen highlight into
+        the main tone (light from above, like frosted glass), then the rest
+        deepens toward the bottom edge. High Contrast keeps a flat surface.
+        """
+        if getattr(self, "_high_contrast", False):
+            return [self._surface_color()] * max(1, rows)
+        rows = max(1, rows)
+        fills: List[str] = []
+        for i in range(rows):
+            t = i / (rows - 1) if rows > 1 else 0.0
+            if t <= 0.22:
+                fills.append(self._lerp_hex(GLASS_SHEEN, GLASS_TOP, t / 0.22))
+            else:
+                fills.append(self._lerp_hex(GLASS_TOP, GLASS_BOTTOM, (t - 0.22) / 0.78))
+        return fills
+
+    def _glass_surface(self, canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
+                       radius: float, fills: List[str]) -> List[int]:
+        """Paint the gradient as 1px scanlines clipped to the rounded shape.
+
+        Each row is inset horizontally where it falls inside a corner arc
+        (``inset = r - sqrt(r^2 - (r - dy)^2)``), so the glass never paints
+        outside the rounded silhouette — the same trick used by chunky
+        rounded-rectangle renderers.
+        """
+        items: List[int] = []
+        r = max(0.0, min(radius, (y2 - y1) / 2.0, (x2 - x1) / 2.0))
+        height = y2 - y1
+        for i, color in enumerate(fills):
+            y = y1 + i
+            inset_x = 0.0
+            if r >= 1.0:
+                dy_top = i
+                dy_bottom = (height - 1) - i
+                if dy_top < r:
+                    inset_x = r - math.sqrt(max(0.0, r * r - (r - dy_top) ** 2))
+                if dy_bottom < r:
+                    inset_x = max(inset_x,
+                                  r - math.sqrt(max(0.0, r * r - (r - dy_bottom) ** 2)))
+            ix1, ix2 = x1 + inset_x, x2 - inset_x
+            if ix2 - ix1 < 0.5:
+                continue
+            items.append(canvas.create_rectangle(ix1, y, ix2, y + 1, fill=color, outline=""))
+        return items
+
     def _surface_color(self) -> str:
         """Card fill color, swapped to the system window color in High Contrast."""
         if getattr(self, "_high_contrast", False):
@@ -2625,24 +2703,31 @@ class SpeedWidget:
         return BG_CARD
 
     def _draw_card(self, width: int, height: int) -> None:
-        """Paint the rounded card background.
+        """Paint the modern glass card background (v2.17.0).
 
-        Shapes are reused across redraws (the old code deleted and recreated
-        ~8 canvas items on every layout change); we now reconfigure their fill
-        in place, which removes a noticeable flicker when toggling compact mode
-        or the lock flash.
+        Structure (same geometry as v2.16 — only the paint changed):
+
+        * outer rounded ring in the border color (amber while a locked
+          drag flashes, neutral otherwise);
+        * inner surface as a vertical sheen->top->bottom gradient rendered
+          with corner-clipped 1px scanlines — a frosted-glass look without
+          touching the card size.
+
+        Shapes are reused across redraws (recolored in place) so toggling
+        compact mode, themes or the lock flash does not flicker.
         """
         if self.bg_canvas is None:
             return
         inset = float(self.border)
         radius = min(self.radius, height / 2.0)
         border_fill = self._border_color()
-        surface_fill = self._surface_color()
         outer = self._rounded_rect(self.bg_canvas, 0.0, 0.0, float(width), float(height),
                                    radius, border_fill)
-        inner = self._rounded_rect(self.bg_canvas, inset, inset,
-                                   width - inset, height - inset,
-                                   max(2.0, radius - inset), surface_fill)
+        surface_rows = max(1, int(round(height - 2 * inset)))
+        inner = self._glass_surface(self.bg_canvas, inset, inset,
+                                    width - inset, height - inset,
+                                    max(2.0, radius - inset),
+                                    self._glass_fills(surface_rows))
         # If we already had shapes, recolor them and delete the new temp ones;
         # this keeps the z-order stable and avoids the delete/recreate churn.
         if self._card_shapes and len(self._card_shapes) == len(outer) + len(inner):
@@ -2655,6 +2740,13 @@ class SpeedWidget:
             for item in outer + inner:
                 self.bg_canvas.delete(item)
         else:
+            # Different shape count (height/radius/contrast change): drop the
+            # stale items so repeated toggles cannot leak canvas objects.
+            for item in self._card_shapes:
+                try:
+                    self.bg_canvas.delete(item)
+                except tk.TclError:
+                    pass
             self._card_shapes = outer + inner
         # Lower in reverse so the outer border ring ends up *below* the inner
         # surface (lowering in list order used to flip the stack, painting the
@@ -3362,14 +3454,21 @@ class SpeedWidget:
         except Exception:
             log.debug("per-process speed sample failed", exc_info=True)
 
-    def _enforce_taskbar_dock(self) -> None:
-        if not self._taskbar_docked or not self.config.get("snap_edges"):
-            return
+    def _taskbar_dock_target(self) -> Optional[Tuple[int, int]]:
+        """Ideal docked position for the card inside the current taskbar.
+
+        v2.17.0: uses ``self.window_width`` / ``self._card_h`` (the
+        authoritative geometry) instead of ``winfo_width()``/``winfo_height()`` —
+        during a relayout the ``winfo`` values can lag one update behind,
+        which fed a stale height into the clamp and moved the card.
+        """
+        if not self.config.get("snap_edges"):
+            return None
         taskbar = self._taskbar_rect_cached()
         if not taskbar:
-            return
+            return None
         tl, tt, tr, tb = taskbar
-        w, h = self.root.winfo_width(), self.root.winfo_height()
+        w, h = self.window_width, self._card_h
         if tr - tl >= tb - tt:
             x = max(tl, min(self.root.winfo_x(), tr - w))
             # Keep the widget inside the Taskbar, aligned to its inner bottom edge.
@@ -3377,7 +3476,19 @@ class SpeedWidget:
         else:
             x = tl if tl == 0 else tr - w
             y = max(tt, min(self.root.winfo_y(), tb - h))
-        if (self.root.winfo_x(), self.root.winfo_y()) != (x, y):
+        return x, y
+
+    def _enforce_taskbar_dock(self) -> None:
+        if not self._taskbar_docked:
+            return
+        target = self._taskbar_dock_target()
+        if target is None:
+            return
+        x, y = target
+        # v2.17.0: deadband instead of exact compare — a ±1px winfo/geometry
+        # rounding must not re-issue a move every tick (card trembled).
+        if (abs(self.root.winfo_x() - x) >= POSITION_DEADBAND or
+                abs(self.root.winfo_y() - y) >= POSITION_DEADBAND):
             self._move_windows(x, y)
 
     def _move_windows(self, x: int, y: int) -> None:
@@ -3481,6 +3592,14 @@ class SpeedWidget:
         self.config.set("locked", self.locked, save=True)
         self._update_lock_indicator()
         if self.locked:
+            # v2.17.0: when the user locks a card that sits on the taskbar,
+            # save the *dock-ideal* position, not whatever ±1px winfo value
+            # the last round-trip produced — the lock target and the dock
+            # target can then never disagree (the locked-card bounce).
+            if self._taskbar_docked:
+                target = self._taskbar_dock_target()
+                if target is not None:
+                    self._move_windows(*target)
             self._save_position()
 
     def _update_lock_indicator(self) -> None:
@@ -3556,7 +3675,7 @@ class SpeedWidget:
         # Top-3 processes by sampled download bandwidth.
         proc_rows = sorted(self._proc_speed.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
         proc_text = "\n".join(
-            f"  {shorten(name,18).ljust(18)} \u2193{format_speed(d):>9}  \u2191{format_speed(u):>9}"
+            f"  {shorten(name,18).ljust(18)} \u2193{format_speed_live(d):>11}  \u2191{format_speed_live(u):>11}"
             for name, (d, u) in proc_rows) or "  --"
         # v2.14.0: explicit connection verdict for the STATUS cell + badge.
         status = {"online": "ONLINE", "offline": "OFFLINE"}.get(self._conn_state, "--")
@@ -3655,7 +3774,7 @@ class SpeedWidget:
                 self._high_contrast = hc
                 self._card_shapes = []
                 self._draw_card(self._card_w, self._card_h)
-            self._enforce_taskbar_dock()
+            self._enforce_position()
             self._raise_windows()
             if self.bg_window is not None and not self._suppress_bg_sync:
                 rx, ry = self.root.winfo_x(), self.root.winfo_y()
@@ -3664,7 +3783,6 @@ class SpeedWidget:
             if now - self._last_adapter_refresh >= ADAPTER_REFRESH_INTERVAL:
                 self.refresh_adapters()
                 self._last_adapter_refresh = now
-            if self.locked: self._enforce_locked_position()
             if self.tooltip.visible and now - self._last_tooltip_refresh >= TOOLTIP_REFRESH_INTERVAL:
                 self.tooltip.show(self._tooltip_data(), self.root)
                 self._last_tooltip_refresh = now
@@ -3697,9 +3815,41 @@ class SpeedWidget:
             pass
 
     def _enforce_locked_position(self) -> None:
+        """Pin the widget to the saved (x, y) — the user's explicit lock.
+
+        v2.17.0: the comparison uses :data:`POSITION_DEADBAND` instead of
+        exact equality. Under per-monitor DPI scaling Tk's ``geometry()``
+        round-trip (set y -> ``winfo_y()``) can differ from the value that
+        was set by ±1 px; an exact compare made this run ``geometry()``
+        again on *every* tick, which surfaced as the card trembling up and
+        down while locked on the taskbar.
+        """
         x, y = self.config.get("x"), self.config.get("y")
-        if isinstance(x, int) and isinstance(y, int) and (self.root.winfo_x(), self.root.winfo_y()) != (x, y):
+        if not (isinstance(x, int) and isinstance(y, int)):
+            return
+        cx, cy = self.root.winfo_x(), self.root.winfo_y()
+        if abs(cx - x) >= POSITION_DEADBAND or abs(cy - y) >= POSITION_DEADBAND:
             self._move_windows(x, y)
+
+    def _enforce_position(self) -> None:
+        """Single per-tick position arbiter (v2.17.0).
+
+        Exactly ONE mover may reposition the widget per tick:
+
+        * ``locked``  -> the saved position wins (the user pinned it there);
+          the taskbar dock re-alignment is skipped entirely.
+        * ``docked``  -> keep the card glued to the taskbar's inner edge.
+
+        Before v2.17.0 both enforcers ran in the same ``_tick`` and could
+        compute slightly different targets (live taskbar rect vs. the stale
+        saved config); each tick the dock moved the card to its ideal and
+        the lock moved it back — the widget visibly bounced up and down a
+        few pixels every second while locked on the taskbar.
+        """
+        if self.locked:
+            self._enforce_locked_position()
+            return
+        self._enforce_taskbar_dock()
 
     def _refresh_labels(self, down: float, up: float) -> None:
         alert_bps = self._alert_bps
