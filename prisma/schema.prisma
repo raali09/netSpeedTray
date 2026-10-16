@@ -1,0 +1,22 @@
+// Prisma schema — آزمونگر سرعت
+// پایگاه‌دادهٔ SQLite در پوشهٔ db کنار پروژه ساخته می‌شود.
+// برای ایجاد پایگاه‌داده: `bun run db:push` (یا `npm run db:push`)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:../db/custom.db"
+}
+
+// نتایج آزمون سرعت — هر رکورد یک آزمون کامل (دانلود/آپلود/پینگ) است.
+model TestResult {
+  id        String   @id @default(cuid())
+  download  Float // Mbps میانگین دانلود
+  upload    Float // Mbps میانگین آپلود
+  ping      Float // میلی‌ثانیه (میانه)
+  jitter    Float @default(0) // میلی‌ثانیه
+  createdAt DateTime @default(now())
+}
