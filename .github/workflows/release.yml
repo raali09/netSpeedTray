@@ -1,99 +1,98 @@
-# ساخت ویجت ویندوزی (exe) و انتشار خودکار Release — NetSpeedTray
-# ------------------------------------------------------------------
-# با هر push روی شاخهٔ main/master (یا اجرای دستی از تب Actions):
-#   ۱) پروژه روی ویندوز بیلد می‌شود (Next.js standalone + Electron)
-#   ۲) فایل‌های NetSpeedTray-Setup-x.y.z.exe و NetSpeedTray-Portable-x.y.z.exe ساخته می‌شوند
-#   ۳) یک GitHub Release با شمارهٔ نسخهٔ package.json ساخته و exeها به آن پیوست می‌شوند
-# نکته: برای انتشار نسخهٔ جدید فقط کافی است شمارهٔ version را در package.json
-# زیاد کنید (و APP_VERSION در src/app/page.tsx) و دوباره push کنید.
+name: Release
 
-name: Build & Release
+# Builds NetSpeedTray.exe with PyInstaller on a Windows runner and attaches it
+# (plus its SHA-256 checksum) to a draft GitHub release.
+#
+# Trigger: push a version tag —
+#   git tag -a v2.13.0 -m "NetSpeedTray 2.13.0"
+#   git push origin main --tags
+#
+# The tag, the VERSION file and the version embedded into the .exe must all
+# agree (the build reads VERSION via netspeedtray.spec).
 
 on:
   push:
-    branches: [main, master]
-  workflow_dispatch: {}
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-release-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build-windows:
-    name: ساخت exe ویندوز
+    name: Build NetSpeedTray.exe (Windows)
     runs-on: windows-latest
 
     steps:
-      - name: دریافت کد
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: نصب Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: "22"
+          python-version: '3.12'
 
-      - name: نصب وابستگی‌ها
-        run: npm install --no-audit --no-fund
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade pyinstaller psutil pillow
 
-      - name: ساخت پایگاه‌دادهٔ اولیه
-        run: npx prisma db push
+      - name: Regenerate app icon if missing
+        if: ${{ !hashFiles('assets/icon.ico') }}
+        run: python make_icon.py
 
-      - name: بیلد Next.js (خروجی standalone)
-        run: npx next build
+      - name: Build single-file exe (PyInstaller)
+        run: python -m PyInstaller --noconfirm --clean netspeedtray.spec
 
-      - name: آماده‌سازی بستهٔ سرور داخلی
-        run: node scripts/postbuild.mjs
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'dist/NetSpeedTray.exe')) {
+            Write-Error 'dist/NetSpeedTray.exe was not produced.'
+            exit 1
+          }
+          Get-Item 'dist/NetSpeedTray.exe' | Select-Object Name, Length
 
-      - name: ساخت exe با electron-builder
-        run: npx electron-builder --win --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Write SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/NetSpeedTray.exe').Hash.ToLower()
+          "$($hash)  NetSpeedTray.exe" | Out-File -FilePath 'dist/NetSpeedTray.exe.sha256' -Encoding ascii
+          Get-Content 'dist/NetSpeedTray.exe.sha256'
 
-      - name: خواندن نسخه از package.json
-        id: ver
+      - name: Resolve release tag
+        id: tag
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$VERSION"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG (VERSION file: $VERSION)"
 
-      - name: حذف Release و Tag قبلی همین نسخه (در صورت وجود)
-        shell: bash
+      - name: Remove any stale release of this version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          gh release delete "v${{ steps.ver.outputs.version }}" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          git push origin --delete "v${{ steps.ver.outputs.version }}" || true
+          gh release delete "${{ steps.tag.outputs.tag }}" --yes --cleanup-tag 2>/dev/null || true
 
-      - name: ساخت GitHub Release و پیوست فایل exe
+      - name: Create draft release with exe attached
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: "NetSpeedTray v${{ steps.ver.outputs.version }}"
-          body: |
-            NetSpeedTray v${{ steps.ver.outputs.version }} — ویجت دسکتاپی «آزمونگر سرعت اینترنت»
-
-            📦 فایل‌های قابل دانلود:
-            - `NetSpeedTray-Setup-${{ steps.ver.outputs.version }}.exe` — نسخهٔ نصب‌شونده
-            - `NetSpeedTray-Portable-${{ steps.ver.outputs.version }}.exe` — نسخهٔ پرتیبل (بدون نیاز به نصب و دسترسی مدیر)
-
-            ✨ امکانات:
-            - سرعت واقعی دانلود/آپلود بر پایهٔ انتقال واقعی داده (نه برآورد مرورگر)
-            - تشخیص صریح قطعی اینترنت — متمایز از «بدون ترافیک»
-            - ویجت کوچک همیشه‌بالای صفحه + آیکون در system tray
-            - تاریخچهٔ نتایج با ذخیره‌سازی محلی (SQLite)
-
-            🔗 commit: ${{ github.sha }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: NetSpeedTray v${{ steps.tag.outputs.version }}
+          draft: true
+          generate_release_notes: true
           files: |
-            release/NetSpeedTray-Setup-*.exe
-            release/NetSpeedTray-Portable-*.exe
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: بارگذاری exe به Artifacts (پشتیبان)
-        uses: actions/upload-artifact@v4
-        with:
-          name: NetSpeedTray-Windows-exe
-          path: release/*.exe
-          if-no-files-found: error
+            dist/NetSpeedTray.exe
+            dist/NetSpeedTray.exe.sha256

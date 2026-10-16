@@ -1,43 +1,17 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.spec
+# Keep our project spec under version control
+!netspeedtray.spec
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
+.venv/
+venv/
+env/
 
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/release/
-
-# بستهٔ سرور داخلی (خروجی scripts/postbuild.mjs)
-/build/server-bundle/
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-*.log
-
-# env files
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# database (runtime artifact — با `bun run db:push` ساخته می‌شود)
-db/*.db
-db/*.db-journal
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
