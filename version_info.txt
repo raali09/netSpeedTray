@@ -3,12 +3,12 @@
 # PyInstaller version-info file for NetSpeedTray.
 # Use with:  pyinstaller --version-file=version_info.txt ...
 #
-# Version: 2.15.0 (FileVersion / ProductVersion reported as 2.15.0.0)
+# Version: 2.16.0 (FileVersion / ProductVersion reported as 2.16.0.0)
 VSVersionInfo(
   ffi=FixedFileInfo(
     # filevers / prodvers are 4-tuples of unsigned short (word).
-    filevers=(2, 15, 0, 0),
-    prodvers=(2, 15, 0, 0),
+    filevers=(2, 16, 0, 0),
+    prodvers=(2, 16, 0, 0),
     # mask=0x3f, flags=0x0, OS=0x40004 (Windows NT), fileType=0x1 (app).
     mask=0x3f,
     flags=0x0,
@@ -24,12 +24,12 @@ VSVersionInfo(
         u'040904B0',
         [StringStruct(u'CompanyName', u'Ali Rahmani'),
         StringStruct(u'FileDescription', u'NetSpeedTray'),
-        StringStruct(u'FileVersion', u'2.15.0.0'),
+        StringStruct(u'FileVersion', u'2.16.0.0'),
         StringStruct(u'InternalName', u'NetSpeedTray'),
         StringStruct(u'LegalCopyright', u'MIT License'),
         StringStruct(u'OriginalFilename', u'NetSpeedTray.exe'),
         StringStruct(u'ProductName', u'NetSpeedTray'),
-        StringStruct(u'ProductVersion', u'2.15.0.0')])
+        StringStruct(u'ProductVersion', u'2.16.0.0')])
       ]),
     VarFileInfo([VarStruct(u'Translation', [0x409, 1200])])
   ]

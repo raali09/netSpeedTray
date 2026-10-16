@@ -177,8 +177,10 @@ def apply_theme(name: str) -> None:
 
 apply_theme(DEFAULT_THEME)
 
-# --- v2.14.0 card metrics -----------------------------------------------------
-STATUS_DOT_R = 2.5        # connection status dot radius (points)
+# --- connection probe (v2.14.0) ---------------------------------------------
+# v2.16.0: the card itself is minimal (speeds + CPU/RAM only); the verdict
+# from these probes feeds the hover tooltip STATUS cell and the app-usage
+# dashboard LIVE badge instead of painting anything on the card.
 PING_RETRY_INTERVAL = 4.0        # re-probe quickly while offline is suspected
 OFFLINE_CONFIRM_ROUNDS = 2       # consecutive failed rounds => "offline"
 
@@ -234,7 +236,7 @@ IDLE_BPS = 1024
 IDLE_TICKS = 5
 ALL_ADAPTERS = "__all__"
 ALERT_CHOICES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0)
-UI_VERSION = 24
+UI_VERSION = 25
 
 # Corner-radius appearance choices (user-selectable from the menu).
 CORNER_RADIUS_CHOICES = {
@@ -296,7 +298,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "auto_hide": False, "snap_edges": True, "alert_mbps": 0.0, "font_size": DEFAULT_FONT_SIZE,
     "corner_radius": DEFAULT_CORNER_RADIUS,
     "theme": DEFAULT_THEME,
-    "show_ping": True, "show_totals": True,
     "ping_host": "", "ping_port": 53,
     "daily_date": "", "daily_down": 0, "daily_up": 0,
     "check_updates_on_start": True,
@@ -568,8 +569,7 @@ class Config:
         if not isinstance(self.data.get("adapter"), str):
             self.data["adapter"] = ALL_ADAPTERS
         for flag in ("locked", "show_sysload", "compact", "auto_hide",
-                     "snap_edges", "check_updates_on_start",
-                     "show_ping", "show_totals"):
+                     "snap_edges", "check_updates_on_start"):
             if not isinstance(self.data.get(flag), bool):
                 self.data[flag] = bool(DEFAULT_CONFIG[flag])
         try:
@@ -621,16 +621,21 @@ class Config:
             self.data.setdefault("ping_host", "")
             self.data.setdefault("ping_port", 53)
         if old_version < 23:
-            # v2.14.0: modern "Midnight" theme, ping status strip and today's
-            # totals. setdefault keeps user choices.
+            # v2.14.0: modern "Midnight" theme. (The show_ping/show_totals
+            # keys introduced here were dropped again in v2.16.0 below.)
             self.data.setdefault("theme", DEFAULT_THEME)
-            self.data.setdefault("show_ping", True)
-            self.data.setdefault("show_totals", True)
         if old_version < 24:
             # v2.15.0: the in-card speed graph was removed at the user's
             # request (the widget is a compact meter; the graph lives on in
             # the hover tooltip) — drop the stale key from old configs.
             self.data.pop("show_graph", None)
+        if old_version < 25:
+            # v2.16.0 "minimal card": the status strip (ping + today's
+            # totals) was removed from the card — the widget shows exactly
+            # four values now (down / up / CPU / RAM). Ping lives on in the
+            # hover tooltip; totals in the tooltip session line.
+            self.data.pop("show_ping", None)
+            self.data.pop("show_totals", None)
         self.data["ui_version"] = UI_VERSION
         self.save()
 
@@ -1809,10 +1814,6 @@ class ModernContextPanel:
                   lambda: (w.sysload_var.set(not w.sysload_var.get()), w._on_toggle_sysload()))
         self._row(inner, "Compact taskbar mode", "ON" if w.compact_var.get() else "OFF",
                   lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
-        self._row(inner, "Ping & status", "ON" if w.pingshow_var.get() else "OFF",
-                  lambda: (w.pingshow_var.set(not w.pingshow_var.get()), w._on_toggle_ping()))
-        self._row(inner, "Today's totals", "ON" if w.totals_var.get() else "OFF",
-                  lambda: (w.totals_var.set(not w.totals_var.get()), w._on_toggle_totals()))
         self._row(inner, "Theme", w.theme_key.capitalize(),
                   lambda: w.theme_menu.post(x, y))
         self._row(inner, "Auto-hide when idle", "ON" if w.autohide_var.get() else "OFF",
@@ -2213,14 +2214,14 @@ class SpeedWidget:
         self._lock_flash = False
         self._high_contrast = False
         self._alert_bps = float(self.config.get("alert_mbps", 0.0)) * 1024.0 * 1024.0
-        # v2.14.0: theme + connection state + in-card graph / status strip.
+        # v2.14.0 themes + connection verdict. v2.16.0: the card itself is
+        # minimal — speeds + CPU/RAM badges only; the verdict feeds the hover
+        # tooltip STATUS cell and the app-usage dashboard LIVE badge.
         self.theme_key = str(self.config.get("theme", DEFAULT_THEME))
         if self.theme_key not in THEMES:
             self.theme_key = DEFAULT_THEME
         apply_theme(self.theme_key)
         self._conn_state = "unknown"   # online / offline / unknown
-        self._strip_items: List[int] = []
-        self._status_dot: Optional[int] = None
         self._card_shapes: List[int] = []
         self._card_w, self._card_h = WINDOW_WIDTH, 48
         self._suppress_bg_sync = False
@@ -2232,13 +2233,11 @@ class SpeedWidget:
             "down_icon": "\u2193", "up_icon": "\u2191",
             "down_value": "0 KB/s", "up_value": "0 KB/s",
             "cpu_badge": "CPU --", "ram_badge": "RAM --",
-            "ping_text": "--", "totals_text": "\u21930B \u21910B",
         }
         self._current_colors: Dict[str, str] = {
             "down_icon": FG_DOWN, "up_icon": FG_UP,
             "down_value": FG_DOWN, "up_value": FG_UP,
             "cpu_badge": FG_CPU, "ram_badge": FG_RAM,
-            "ping_text": FG_LABEL, "totals_text": FG_DIM,
         }
 
         self.root = tk.Tk()
@@ -2446,23 +2445,8 @@ class SpeedWidget:
         self.row_h = max(self._text_size("0 KB/s", self.font_value)[1],
                          self._text_size("\u2193", self.font_icon)[1],
                          self._text_size("CPU --", self.font_system)[1]) + pad_y
-        # v2.14.0: status strip metrics (DPI-aware).
-        self.dot_r = max(2, int(round(STATUS_DOT_R * self.ui_scale)))
-        self.strip_h = max(self._text_size("999 ms", self.font_system)[1] + 2,
-                           2 * self.dot_r + 4)
-        self._ping_px = self._text_size("999 ms", self.font_system)[0]
-        # v2.15.0: compact totals sample — the old wide "↓ 999.99 GB   ↑ 999.99 GB"
-        # reservation made the card ~40px wider than the speed+badge content,
-        # which showed up as dead space between the speeds and CPU/RAM badges.
-        self._totals_px = self._text_size(
-            "\u2193999.9G \u2191999.9G", self.font_system)[0]
-        # v2.15.0: the strip no longer reserves its worst-case text. The
-        # reservation starts pessimistic (the samples above) so the very
-        # first paint can never clip, then _maybe_tighten_strip() re-fits it
-        # to the *actual* strip text — that is what removed the dead column
-        # between the readings and the CPU/RAM badges. Reset here (not in
-        # __init__) so a font change re-measures in the new metrics.
-        self._strip_px_actual: Optional[int] = None
+        # v2.16.0: the status-strip metrics are gone with the strip itself —
+        # the card content is exactly two speed rows + CPU/RAM badges.
         self.value_px = self._value_px_max
         self._recompute_width()
 
@@ -2485,29 +2469,13 @@ class SpeedWidget:
             return bool(self.sysload_var.get())
         return bool(self.config.get("show_sysload", True))
 
-    def _include_ping(self) -> bool:
-        if self.compact:
-            return False
-        if hasattr(self, "pingshow_var"):
-            return bool(self.pingshow_var.get())
-        return bool(self.config.get("show_ping", True))
-
-    def _include_totals(self) -> bool:
-        if self.compact:
-            return False
-        if hasattr(self, "totals_var"):
-            return bool(self.totals_var.get())
-        return bool(self.config.get("show_totals", True))
-
-    def _include_strip(self) -> bool:
-        return not self.compact and (self._include_ping() or self._include_totals())
-
     def _compute_card_height(self) -> int:
-        """Total card height: speed rows + optional status strip."""
+        """Total card height: speed rows (+ CPU/RAM badges on the right).
+
+        v2.16.0: no status strip — the card shows exactly four values.
+        """
         rows = 1 if self.compact else 2
         height = rows * self.row_h
-        if self._include_strip():
-            height += self.strip_h
         height += 2 * (self.border + CONTENT_PAD_Y)
         return int(max(height, 2 * self.radius + 4))
 
@@ -2522,22 +2490,6 @@ class SpeedWidget:
             content = speed_width
             if self._include_sysload():
                 content += SEP_PAD + 1 + self.badge_px
-        if self._include_strip():
-            # v2.15.0: prefer the measured width of the ACTUAL strip text; the
-            # worst-case samples are only the first-paint reservation.
-            actual = getattr(self, "_strip_px_actual", None)
-            if actual is not None:
-                strip_w = actual
-            else:
-                strip_w = 0
-                if self._include_ping():
-                    strip_w += 2 * self.dot_r + 4 + self._ping_px
-                if self._include_totals():
-                    strip_w += self._totals_px
-                if strip_w:
-                    strip_w += 4
-            if strip_w:
-                content = max(content, strip_w)
         self.window_width = int(max(WINDOW_WIDTH,
                                     content + 2 * (self.border + CONTENT_PAD_X)))
 
@@ -2553,13 +2505,6 @@ class SpeedWidget:
             for item in items:
                 self.canvas.delete(item)
         self._text_items = {}
-        for item in getattr(self, "_strip_items", []):
-            try:
-                self.canvas.delete(item)
-            except tk.TclError:
-                pass
-        self._strip_items = []
-        self._status_dot = None
         if self.bg_canvas is not None:
             self.bg_canvas.delete("dynamic_sep")
             self.bg_canvas.delete("graph_bg")
@@ -2590,27 +2535,9 @@ class SpeedWidget:
                             self._current_colors["ram_badge"], "e")
             self._draw_separator(self._rows_bottom())
 
-        # v2.14.0: status strip — connection dot + ping on the left, today's
-        # totals on the right, in one slim line under the rows.
-        if self._include_strip():
-            card_h = self._compute_card_height()
-            cy = card_h - self.border - CONTENT_PAD_Y - self.strip_h / 2.0
-            left = float(self.border + CONTENT_PAD_X)
-            if self._include_ping():
-                r = float(self.dot_r)
-                cx = left + r
-                self._status_dot = self.canvas.create_oval(
-                    cx - r, cy - r, cx + r, cy + r,
-                    fill=self._dot_color(), outline=SHADOW_COLOR, width=1)
-                self._strip_items.append(self._status_dot)
-                self._make_text("ping_text", left + 2 * self.dot_r + 4, cy,
-                                self._current_texts["ping_text"], self.font_system,
-                                self._current_colors["ping_text"], "w")
-            if self._include_totals():
-                right = float(self.window_width - self.border - CONTENT_PAD_X)
-                self._make_text("totals_text", right, cy,
-                                self._current_texts["totals_text"], self.font_system,
-                                self._current_colors["totals_text"], "e")
+        # v2.16.0: the v2.14 status strip (connection dot + ping + today's
+        # totals) is gone — the user asked for a card with nothing but the
+        # four values. Ping/totals remain available in the hover tooltip.
 
     def _draw_separator(self, bottom_y: float) -> None:
         if self.bg_canvas is None:
@@ -2736,102 +2663,23 @@ class SpeedWidget:
             self.bg_canvas.tag_lower(item)
 
     def _border_color(self) -> str:
-        """Border color: red ring while offline, amber flash when a locked
-        drag is attempted, else neutral.
+        """Border color: amber flash when a locked drag is attempted, else
+        neutral.
 
         In High Contrast mode the border is forced to the system window-frame
         color so the card outline remains visible against the high-contrast
         desktop.
+
+        v2.16.0: no offline ring anymore — the card stays minimal (the
+        connection verdict lives in the hover tooltip / dashboard).
         """
         if getattr(self, "_high_contrast", False):
             return "#000000"
-        if self._conn_state == "offline":
-            return FG_OFF
         return FG_LOCK_FLASH if self._lock_flash else BORDER_COLOR
 
     def _rows_bottom(self) -> int:
         rows = 1 if self.compact else 2
         return self.border + CONTENT_PAD_Y + rows * self.row_h + 2
-
-    def _dot_color(self) -> str:
-        if getattr(self, "_high_contrast", False):
-            return {"online": "#107C10",
-                    "offline": "#C50F1F"}.get(self._conn_state, "#5A5A5A")
-        return {"online": FG_OK,
-                "offline": FG_OFF}.get(self._conn_state, FG_LABEL)
-
-    def _update_status_strip(self) -> None:
-        """Refresh dot color, ping text and today's totals in the strip."""
-        if not self._include_strip():
-            return
-        if self._include_ping():
-            if self._conn_state == "offline":
-                self._set_text("ping_text", "OFFLINE", FG_OFF)
-            else:
-                value = self.ping.value
-                color = FG_DIM if value != "--" else FG_LABEL
-                self._set_text("ping_text", value, color)
-            dot = getattr(self, "_status_dot", None)
-            if dot is not None and self.canvas is not None:
-                try:
-                    self.canvas.itemconfig(dot, fill=self._dot_color())
-                except tk.TclError:
-                    pass
-        if self._include_totals():
-            # v2.15.0: compact totals ("↓1.2G ↑340M") — the wide format was
-            # the reason the card stretched wider than its core content.
-            # While offline the red OFFLINE label replaces the totals (the
-            # card width only reserves "999 ms" for the ping).
-            if self._conn_state == "offline" and self._include_ping():
-                self._set_text("totals_text", "", FG_DIM)
-            else:
-                text = (f"\u2193{format_bytes_compact(self.totals.daily_down)}"
-                        f" \u2191{format_bytes_compact(self.totals.daily_up)}")
-                self._set_text("totals_text", text, FG_DIM)
-        # Re-fit the card width to what the strip actually shows — this is
-        # what keeps the CPU/RAM badges snug against the readings.
-        self._maybe_tighten_strip()
-
-    def _measure_strip_actual(self) -> int:
-        """Pixel width the strip needs for its CURRENT texts.
-
-        Mirrors the reservation formula in _recompute_width(), but measured
-        from the real ping/totals strings instead of the worst-case samples.
-        """
-        w = 0
-        if self._include_ping():
-            text = self._current_texts.get("ping_text", "") or "--"
-            w += 2 * self.dot_r + 4 + self._text_size(text, self.font_system)[0]
-        if self._include_totals():
-            text = self._current_texts.get("totals_text", "")
-            if text:
-                w += self._text_size(text, self.font_system)[0]
-        if w:
-            w += 4
-        return w
-
-    def _maybe_tighten_strip(self) -> None:
-        """Fit the card width to the actual strip text, with hysteresis.
-
-        v2.15.0: the strip used to reserve its worst case ("999 ms" +
-        "↓999.9G ↑999.9G"), which made the card ~30px wider than the
-        speed+badge content — the "extra gap between CPU/RAM and the
-        speeds" the user reported. The reservation now follows the real
-        text: it grows immediately (clipping would be worse) but shrinks
-        only when it is >=8px too wide, so a ping flipping between "9 ms"
-        and "14 ms" cannot make the card edge jitter every second.
-        """
-        if not self._include_strip() or self._closing:
-            return
-        needed = self._measure_strip_actual()
-        current = getattr(self, "_strip_px_actual", None)
-        if current is not None:
-            if needed > current:
-                pass                      # grow: relayout right away
-            elif current - needed < 8:
-                return                   # close enough — no churn
-        self._strip_px_actual = needed
-        self._relayout()
 
     def _link_up(self) -> bool:
         """True when at least one non-loopback interface has link."""
@@ -2864,14 +2712,10 @@ class SpeedWidget:
             self._set_connection_state("unknown")
 
     def _set_connection_state(self, state: str) -> None:
-        if state == self._conn_state:
-            return
+        # v2.16.0: the verdict only feeds the hover tooltip STATUS cell and
+        # the app-usage dashboard LIVE badge — the minimal card paints
+        # nothing for it (no ring, no dot, no OFFLINE text).
         self._conn_state = state
-        self._update_status_strip()
-        # Red border ring + red dot + OFFLINE text make "internet is down"
-        # unmistakable — and clearly distinct from "no traffic" (which simply
-        # reads 0 KB/s with a green dot).
-        self._draw_card(self._card_w, self._card_h)
 
     def _sync_layer_geometry(self, x: int, y: int, width: int, height: int) -> None:
         """Move both layers atomically enough to avoid a one-frame ghost/offset."""
@@ -2906,7 +2750,6 @@ class SpeedWidget:
         self._relayout()
         if self._include_sysload():
             self._update_system_labels()
-        self._update_status_strip()
         if self.locked:
             self._enforce_locked_position()
 
@@ -2945,12 +2788,6 @@ class SpeedWidget:
         self.compact_var = tk.BooleanVar(value=self.compact)
         self.menu.add_checkbutton(label="Compact taskbar mode", variable=self.compact_var,
                                    command=self._on_toggle_compact, selectcolor=FG_CHECK)
-        self.pingshow_var = tk.BooleanVar(value=bool(self.config.get("show_ping", True)))
-        self.menu.add_checkbutton(label="Show ping & status", variable=self.pingshow_var,
-                                   command=self._on_toggle_ping, selectcolor=FG_CHECK)
-        self.totals_var = tk.BooleanVar(value=bool(self.config.get("show_totals", True)))
-        self.menu.add_checkbutton(label="Show today's totals", variable=self.totals_var,
-                                   command=self._on_toggle_totals, selectcolor=FG_CHECK)
         self.font_size_var = tk.StringVar(value=self.font_size_key)
         self.font_menu = tk.Menu(self.menu, **menu_opts)
         for fkey in ("small", "medium", "large", "xlarge"):
@@ -3086,14 +2923,6 @@ class SpeedWidget:
         self.config.set("compact", self.compact, save=True)
         self._refresh_layout()
 
-    def _on_toggle_ping(self) -> None:
-        self.config.set("show_ping", bool(self.pingshow_var.get()), save=True)
-        self._refresh_layout()
-
-    def _on_toggle_totals(self) -> None:
-        self.config.set("show_totals", bool(self.totals_var.get()), save=True)
-        self._refresh_layout()
-
     def set_theme(self, key: str) -> None:
         """Switch the palette at runtime; every surface rebuilds on demand."""
         if key not in THEMES:
@@ -3109,7 +2938,6 @@ class SpeedWidget:
             "down_icon": FG_DOWN, "up_icon": FG_UP,
             "down_value": FG_DOWN, "up_value": FG_UP,
             "cpu_badge": FG_CPU, "ram_badge": FG_RAM,
-            "ping_text": FG_LABEL, "totals_text": FG_DIM,
         })
         self._card_shapes = []          # force a full card repaint
         self._build_menu()
@@ -3811,9 +3639,9 @@ class SpeedWidget:
         try:
             # Latency probe runs on its own throttle (non-blocking).
             self.ping.maybe_probe()
-            # v2.14.0: explicit online/offline verdict + status strip refresh.
+            # v2.14.0: explicit online/offline verdict. v2.16.0: the card
+            # stays minimal — the verdict feeds the tooltip/dashboard only.
             self._evaluate_connection()
-            self._update_status_strip()
             # Refresh local/public IP + Wi-Fi signal lazily (~30s).
             self._refresh_net_info()
             # Per-process speed sampling (~every tick is fine; it is cheap

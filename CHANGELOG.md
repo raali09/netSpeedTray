@@ -4,6 +4,30 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.0] - 2026-10-16
+
+The "Minimal Four" release — per user request, the card now shows **exactly
+four values and nothing else**: download speed, upload speed, CPU and RAM.
+
+### Removed
+- **Status strip** — the v2.14 line under the readings (connection dot +
+  live ping on the left, today's traffic totals on the right) is gone from
+  the card, together with its *Show ping & status* / *Show today's totals*
+  menu entries and the `show_ping` / `show_totals` config keys (existing
+  configs are migrated, `ui_version` 25).
+- **Offline paint on the card** — the red border ring and the red dot that
+  2.14 drew while the internet was down no longer appear on the card. The
+  connection verdict itself is still computed (link state + probe rounds);
+  it now surfaces only in the **hover tooltip** (STATUS cell + LIVE/OFFLINE
+  badge) and in the **app-usage dashboard** LIVE badge, keeping the card
+  itself perfectly minimal. With the internet down the card simply reads
+  `0 KB/s`.
+
+### Unchanged on purpose
+- The hover tooltip (sparkline, ping/jitter, IPs, session totals, top apps)
+  and the per-app usage dashboard keep all their information — the
+  "nothing else" rule applies to the always-visible card only.
+
 ## [2.15.0] - 2026-10-16
 
 The "Live & Compact" release — direct response to user feedback on 2.14.0:

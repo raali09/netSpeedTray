@@ -11,7 +11,23 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
-## What's new in 2.15.0
+## What's new in 2.16.0
+
+The **"Minimal Four"** release — per user request, the card shows **exactly
+four values and nothing else**: download speed, upload speed, CPU and RAM.
+
+- **Status strip removed** — the connection dot, live ping and today's
+  totals no longer take a line under the readings; the card is two rows
+  (↓ / ↑) plus the CPU/RAM badges, full stop.
+- **No offline paint on the card** — the red border ring/dot of 2.14 is
+  gone. The connection verdict is still computed and shows in the **hover
+  tooltip** (STATUS cell + LIVE/OFFLINE badge) and the app-usage dashboard
+  badge; with the internet down the card simply reads `0 KB/s`.
+- Everything you may need lives behind the card: hover for the sparkline,
+  ping/jitter, IPs and session totals; right-click for the per-app usage
+  dashboard and settings.
+
+## What was new in 2.15.0
 
 The **"Live & Compact"** release — built directly from user feedback on 2.14.0,
 still zero new dependencies:
@@ -37,15 +53,8 @@ upgrade, with no new dependencies:
 - **Modern Midnight theme** (new default) — deeper glass-navy card, brighter
   cyan/amber readings, green/red connection colors. The old look is one click
   away: right-click → *Theme* → *Classic*.
-- **Status strip** — `● 12 ms` connection dot + live latency on the left,
-  today's totals on the right.
-- **Explicit offline detection** — when the internet goes down the border ring,
-  dot and ping text turn red with an `OFFLINE` label — clearly different from
-  *no traffic*, which simply reads `0 KB/s` with a green dot. Detection uses
-  two signals: interface link state plus failed probes to Cloudflare/Google
-  DNS with a fast retry cadence, so recovery is noticed within seconds.
-- Each element (ping, totals) can be toggled individually from the
-  right-click menu; compact taskbar mode stays a single tight row.
+- (2.16.0 note: the 2.14 status strip and offline ring have since been
+  removed from the card — the theme choice remains.)
 
 ## What was new in 2.13.0
 
@@ -63,7 +72,7 @@ setups, and accessibility:
 
 - **Speed sparkline** — a tiny mini-chart of recent download/upload speed now lives in the
   hover tooltip, so you can see trends, not just the current value.
-- **Custom ping target** — set any host:port to measure latency to; shown next to the totals.
+- **Custom ping target** — set any host:port to measure latency to; shown in the hover tooltip.
 - **Local & public IP** — both your LAN address and your public-facing IP appear in the
   tooltip (public IP is fetched once on start-up and refreshed lazily).
 - **Wi-Fi signal strength** — a small badge reports your current Wi-Fi signal quality
@@ -263,9 +272,7 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 | `opacity` | Card background opacity, `0.20`–`1.0` (also driven by the slider) |
 | `x`, `y` | Saved window position |
 | `adapter` | Adapter name, or `__all__` for the combined total |
-| `show_sysload` | Show the CPU / RAM badges |
-| `show_ping` | Show the connection dot + latency in the status strip (v2.14.0) |
-| `show_totals` | Show today's traffic totals in the status strip (v2.14.0, compact since 2.15.0) |
+| `show_sysload` | Show the CPU / RAM badges next to the speeds (default on) |
 | `theme` | `midnight` (modern, default) or `classic` (the 2.13 look) |
 | `alert_mbps` | Highlight the readings above this speed, `0` turns it off |
 | `check_updates_on_start` | Silently check GitHub for a newer release on launch |
