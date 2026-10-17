@@ -82,9 +82,11 @@ def format_bytes(total: float) -> str:
     """Human-readable byte total with a sensible unit."""
     if total < 1024:
         return f"{int(total)} B"
-    for unit in ("KB", "MB", "GB", "TB"):
+    # v2.18.1: the loop only divided through TB, so a full PiB surfaced as
+    # "1024.00 PB" instead of "1.00 PB". PB now participates in the ladder.
+    for unit in ("KB", "MB", "GB", "TB", "PB"):
         total /= 1024.0
-        if total < 1024:
+        if total < 1024 or unit == "PB":
             return f"{total:.{0 if unit == 'KB' else 2}f} {unit}"
     return f"{total:.2f} PB"
 

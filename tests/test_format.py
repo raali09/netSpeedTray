@@ -62,10 +62,9 @@ class TestFormatBytes:
         assert nst.format_bytes(value) == expected
 
     def test_format_bytes_petabyte_range(self):
-        # The implementation's loop only divides through TB, so a full PiB
-        # surfaces as "1024.00 PB" rather than "1.00 PB". Pin the actual
-        # behaviour so a future fix to the loop is a visible test change.
-        assert nst.format_bytes(1024 ** 5) == "1024.00 PB"
+        # v2.18.1: the loop now divides through PB, so a full PiB reads
+        # "1.00 PB" instead of the old "1024.00 PB" overflow text.
+        assert nst.format_bytes(1024 ** 5) == "1.00 PB"
 
 
 # --- format_duration --------------------------------------------------------

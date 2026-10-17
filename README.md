@@ -11,6 +11,32 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
+## What's new in 2.18.1
+
+The **"Smooth Sample"** maintenance release — a code-review pass fixing real
+defects, with no behaviour changes:
+
+- **No more once-a-second UI freeze** — the per-app I/O scan (used by the App
+  Network Usage dashboard and the tooltip's top-app rows) ran across the whole
+  process table *on the UI thread* every second; it now runs on a background
+  worker, so the card, dragging and popups never stutter.
+- **Update dialog can no longer crash at exit** — its download worker now hops
+  back to the UI thread through the same safe path used everywhere else.
+- **Readings never overlap the ↓/↑ icons** — the card's reserved text width now
+  matches the widest string the formatter can produce (`99.9 GB/s`), fixing
+  overlap at 1000–1023 KB/s and 10–99.9 GB/s.
+- **Sparkline plots true rates** (bytes/s) instead of per-tick byte deltas, so
+  timer drift no longer skews the chart.
+- **`format_bytes` fixed at the PiB boundary** (`1.00 PB`, not `1024.00 PB`).
+- **Robuster single-instance check** (documented-safe `ctypes` last-error
+  reading) and an **updater that survives non-ASCII (e.g. Persian) Windows
+  usernames** — the swap script is now written with ASCII 8.3 short paths.
+- **Honest dashboard empty-state** — "no sampled traffic in the last second"
+  instead of a wrong "no active connections".
+- **Packaging cleanup** — `requirements.txt` holds only the runtime dependency
+  (`psutil`); dev extras live in `requirements-dev.txt`; the `net_speed`
+  package metadata matches the actual single-module layout.
+
 ## What's new in 2.17.0
 
 The **"Steady Glass"** release — three direct user requests, zero new
@@ -164,6 +190,7 @@ Prefer to run from source? See below.
 - Python 3.9 or newer (developed against 3.14)
 - [psutil](https://pypi.org/project/psutil/) — the only runtime dependency
 - [Pillow](https://pypi.org/project/Pillow/) — only needed to regenerate the app icon
+  (dev extras: `py -m pip install -r requirements-dev.txt`)
 
 ## Install and run
 
@@ -303,7 +330,7 @@ adapter, alert threshold, toggles, daily totals, update check). Delete the file 
 NetSpeedTray/
 ├── src/
 │   ├── netspeedtray.py        # entry point — UI classes, themes and the main loop
-│   └── net_speed/             # backend package (v2.7.0 modular split)
+│   └── net_speed/             # dependency-light helpers (v2.7.0 modular split)
 │       ├── __init__.py
 │       └── utils.py           # formatting, adapter listing, version parsing
 ├── tests/                     # pytest suite — run with `pytest tests/`
@@ -311,7 +338,8 @@ NetSpeedTray/
 │   ├── icon.png               # window / taskbar icon
 │   └── icon.ico               # embedded .exe icon (multi-resolution)
 ├── make_icon.py               # regenerates assets/icon.{png,ico}
-├── requirements.txt           # runtime dependency (psutil)
+├── requirements.txt           # runtime dependency (psutil only)
+├── requirements-dev.txt       # dev extras (Pillow, pytest)
 ├── README.md
 ├── CONTRIBUTING.md            # how to set up a dev environment & contribute
 ├── LICENSE                    # MIT
@@ -338,7 +366,7 @@ makes them unit-testable on CI without a display. The UI classes (`NetSpeedTray`
 ### Tests
 
 ```bash
-py -m pip install pytest
+py -m pip install -r requirements-dev.txt
 pytest tests/                  # from the repo root
 ```
 

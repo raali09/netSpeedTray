@@ -270,6 +270,9 @@ DEFAULT_CORNER_RADIUS = "medium"
 
 # Sparkline (mini speed chart) configuration.
 SPARKLINE_SAMPLES = 60          # 60 seconds of history at 1 Hz
+# v2.18.1: cap on the per-app *session totals* map — a long-running session
+# with many different apps used to grow it without limit.
+PROC_TOTAL_LIMIT = 512
 SPARKLINE_WIDTH = 150
 SPARKLINE_HEIGHT = 38
 
@@ -280,7 +283,11 @@ CONTENT_PAD_X = 2
 CONTENT_PAD_Y = 0
 ICON_GAP = 1
 SEP_PAD = 1
-VALUE_SAMPLE = "999 MB/s"
+# v2.18.1: the widest string format_speed() can produce is "99.9 GB/s"
+# (9 chars). The old "999 MB/s" sample (7 chars) let 1000–1023 KB/s and
+# 10–99.9 GB/s readings grow past the reserved field and overlap the
+# ↓/↑ arrow icons. Reserve the real maximum.
+VALUE_SAMPLE = "99.9 GB/s"
 # Padding that used to come free from tk.Label defaults; explicit now that
 # text is measured with font metrics, so the card keeps its old proportions.
 GLYPH_PAD_X = 4
@@ -1211,6 +1218,22 @@ def download_update(asset_url: str, dest_path: str,
         return False
 
 
+def _short_path(path: str) -> str:
+    """Best-effort 8.3 short path (pure ASCII) for a Windows file path."""
+    if not IS_WINDOWS:
+        return path
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetShortPathNameW.restype = ctypes.c_uint
+        kernel32.GetShortPathNameW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        buf = ctypes.create_unicode_buffer(1024)
+        if kernel32.GetShortPathNameW(path, buf, 1024):
+            return buf.value
+    except Exception:
+        pass
+    return path
+
+
 def install_update(temp_exe: str) -> bool:
     """Spawn a helper batch that swaps the running exe for the downloaded one.
 
@@ -1227,6 +1250,14 @@ def install_update(temp_exe: str) -> bool:
     current_exe = sys.executable
     if not current_exe or not os.path.exists(current_exe):
         return False
+    # v2.18.1: cmd.exe parses .bat files in the ANSI/OEM codepage, not UTF-8.
+    # A %APPDATA% / %TEMP% path containing non-ASCII characters (e.g. a
+    # Persian Windows username) garbled every path in the script and the
+    # update swap silently failed. Prefer 8.3 short paths (always ASCII);
+    # when the volume has short names disabled, fall back to writing the
+    # .bat in the ANSI codepage so cmd can parse it.
+    current_exe = _short_path(current_exe)
+    temp_exe = _short_path(temp_exe)
     # Keep the updater in the user's AppData (not shared %TEMP%) so another
     # user on the machine cannot plant a replacement batch file.
     updater_dir = os.path.join(CONFIG_DIR, "updater")
@@ -1238,8 +1269,10 @@ def install_update(temp_exe: str) -> bool:
     backup_exe = current_exe + ".old"
     cur_name = os.path.basename(current_exe)
     backup_name = os.path.basename(backup_exe)
+    ascii_paths = current_exe.isascii() and temp_exe.isascii()
+    encoding = "ascii" if ascii_paths else "mbcs"
     try:
-        with open(updater_path, "w", encoding="utf-8") as fh:
+        with open(updater_path, "w", encoding=encoding) as fh:
             fh.write("@echo off\r\n")
             fh.write("timeout /t 2 /nobreak >nul\r\n")
             # Best-effort cleanup of a previous backup from an older update.
@@ -1267,7 +1300,9 @@ def install_update(temp_exe: str) -> bool:
             fh.write(f'del /f /q "{backup_exe}" >nul 2>&1\r\n')
             fh.write(f'del /f /q "{temp_exe}" >nul 2>&1\r\n')
             fh.write('del /f /q "%~f0" >nul 2>&1\r\n')
-    except OSError:
+    except (OSError, ValueError, UnicodeError):
+        # mbcs cannot map every Unicode path — if even the ANSI fallback
+        # fails to encode, give up and let the user update from the browser.
         log.warning("updater script write failed", exc_info=True)
         return False
     try:
@@ -1716,8 +1751,13 @@ class AppUsageDashboard:
         if values is None:
             for frame, _labels in self._rows:
                 frame.pack_forget()
-            self._status_label.config(
-                text=f"  {self.widget.scanner.status or 'no active connections'}")
+            status = self.widget.scanner.status
+            if not status:
+                # The connection scan succeeded and found holders, but no app
+                # showed sampled I/O deltas in the last second — reporting
+                # "no active connections" here was simply wrong.
+                status = "no sampled traffic in the last second"
+            self._status_label.config(text=f"  {status}")
             if not self._status_label.winfo_ismapped():
                 self._status_label.pack(fill="x", pady=1)
             return
@@ -1828,7 +1868,9 @@ class ModernContextPanel:
             item.bind("<Leave>", lambda _e: paint_dev(BG_SPEED_ROW))
 
         # Features & Settings Rows
-        self._row(inner, "📊 App Network Usage", "Open", lambda: self._open_dashboard(x, y), accent=FG_DOWN)
+        # v2.18.1: plain text instead of the emoji — Tk renders colour emoji
+        # as monochrome (or tofu) on many Windows font stacks.
+        self._row(inner, "App Network Usage", "Open", lambda: self._open_dashboard(x, y), accent=FG_DOWN)
         self._row(inner, "Lock position", "ON" if w.locked else "OFF", w.toggle_lock)
         self._row(inner, "Show CPU / RAM", "ON" if w.sysload_var.get() else "OFF",
                   lambda: (w.sysload_var.set(not w.sysload_var.get()), w._on_toggle_sysload()))
@@ -2106,9 +2148,12 @@ class UpdateDialog:
 
         def worker() -> None:
             ok = download_update(url, temp_path)
-            if self.window is None or not self.window.winfo_exists():
+            if self.widget._closing or self.window is None or not self.window.winfo_exists():
                 return
-            self.window.after(0, lambda: self._after_download(ok, temp_path))
+            # v2.18.1: this worker used to call window.after() directly from a
+            # non-Tcl thread; tkinter is not thread-safe, and the codebase
+            # already had _safe_after exactly for this hop.
+            self.widget._safe_after(lambda: self._after_download(ok, temp_path))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2214,6 +2259,10 @@ class SpeedWidget:
         self._proc_total: Dict[str, Tuple[int, int]] = {}  # name -> (down_bytes, up_bytes) session totals
         self._proc_io_last: Dict[int, Tuple[int, int]] = {}  # pid -> (last_recv_bytes, last_sent_bytes)
         self._proc_speed_last = 0.0
+        # v2.18.1: the per-app IO scan runs on a worker thread; the UI thread
+        # only ever reads lock-protected snapshots (see _maybe_sample_proc_speed).
+        self._proc_lock = threading.Lock()
+        self._proc_busy = False
         self.last_down = self.last_up = 0.0
         self._idle_ticks, self._faded, self._closing = 0, False, False
         self._last_system_sample = 0.0
@@ -3316,7 +3365,7 @@ class SpeedWidget:
             pass
 
     def _sparkline_push(self, down_bps: float, up_bps: float) -> None:
-        """Append one sample to the rolling speed history (called each tick)."""
+        """Append one *rate* sample (bytes/s) to the rolling speed history."""
         self._spark_down.append(max(0.0, down_bps))
         self._spark_up.append(max(0.0, up_bps))
         if len(self._spark_down) > SPARKLINE_SAMPLES:
@@ -3388,19 +3437,39 @@ class SpeedWidget:
         sorted by current activity so the busiest app is always on top.
         """
         rows: List[Tuple[str, int, int, int, int]] = []
-        for name, (d, u) in self._proc_speed.items():
-            td, tu = self._proc_total.get(name, (0, 0))
+        with self._proc_lock:
+            speed = dict(self._proc_speed)
+            total = dict(self._proc_total)
+        for name, (d, u) in speed.items():
+            td, tu = total.get(name, (0, 0))
             rows.append((name, d, u, td + tu, self.scanner.counts.get(name, 0)))
         rows.sort(key=lambda r: r[1] + r[2], reverse=True)
         return rows[:limit]
 
-    def _sample_proc_speed(self) -> None:
-        """Live per-app download/upload rates for the App Usage Dashboard.
+    def _maybe_sample_proc_speed(self) -> None:
+        """Kick a background per-app IO sample when the previous one finished.
 
-        v2.15.0: previously this only sampled the top connection holders and
-        fed a static tooltip list, so the dashboard showed nothing live. Now
-        every running process's cumulative IO counters are diffed once per
-        tick into per-app rates + session totals, keyed on executable name.
+        v2.18.1: the scan itself used to run inline on the Tk main loop —
+        ``psutil.process_iter()`` over the whole process table with
+        ``io_counters`` takes tens to hundreds of milliseconds on a busy
+        Windows box, and it ran *every second*, freezing the card, the drag
+        and every popup for the duration. It now runs on a daemon worker;
+        this method never blocks.
+        """
+        if self._proc_busy:
+            return
+        if time.monotonic() - self._proc_speed_last < 1.0:
+            return
+        self._proc_busy = True
+        threading.Thread(target=self._sample_proc_speed, daemon=True).start()
+
+    def _sample_proc_speed(self) -> None:
+        """Worker: live per-app download/upload rates for the App Usage Dashboard.
+
+        Runs on a daemon thread (see _maybe_sample_proc_speed). v2.15.0
+        previously sampled only the top connection holders; this full-table
+        version diffs every running process's cumulative IO counters into
+        per-app rates + session totals, keyed on executable name.
 
         Exact per-process *network* bandwidth would need ETW (admin + complex);
         ``io_read_bytes`` / ``io_write_bytes`` approximate network+disk IO and
@@ -3412,8 +3481,7 @@ class SpeedWidget:
             now = time.monotonic()
             result: Dict[str, Tuple[int, int]] = {}
             totals: Dict[str, Tuple[int, int]] = {}
-            last = getattr(self, "_proc_speed_last", 0.0)
-            dt = max(0.001, now - last) if last else 0.0
+            dt = max(0.001, now - self._proc_speed_last) if self._proc_speed_last else 0.0
             for proc in psutil.process_iter(attrs=["pid", "name", "io_counters"]):
                 try:
                     io = proc.info["io_counters"]
@@ -3435,7 +3503,9 @@ class SpeedWidget:
                     totals[name] = (td + d_bytes, tu + u_bytes)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError):
                     continue
-            # Drop processes that exited so the maps do not grow forever.
+            # Drop processes that exited so the map does not grow forever.
+            # (This second scan also used to run on the UI thread; on the
+            # worker it is free.)
             if len(self._proc_io_last) > 1024:
                 alive = set()
                 for proc in psutil.process_iter(attrs=["pid"]):
@@ -3446,13 +3516,23 @@ class SpeedWidget:
                 for pid in list(self._proc_io_last):
                     if pid not in alive:
                         del self._proc_io_last[pid]
-            self._proc_speed = result
-            for name, (d, u) in totals.items():
-                td, tu = self._proc_total.get(name, (0, 0))
-                self._proc_total[name] = (td + d, tu + u)
-            self._proc_speed_last = now
+            with self._proc_lock:
+                self._proc_speed = result
+                for name, (d, u) in totals.items():
+                    td, tu = self._proc_total.get(name, (0, 0))
+                    self._proc_total[name] = (td + d, tu + u)
+                # v2.18.1: bound the session-total map — a machine that churns
+                # through many apps in a days-long session used to grow this
+                # dict without limit. Keep the busiest entries.
+                if len(self._proc_total) > PROC_TOTAL_LIMIT:
+                    ranked = sorted(self._proc_total.items(),
+                                    key=lambda kv: kv[1][0] + kv[1][1], reverse=True)
+                    self._proc_total = dict(ranked[:PROC_TOTAL_LIMIT])
+                self._proc_speed_last = now
         except Exception:
             log.debug("per-process speed sample failed", exc_info=True)
+        finally:
+            self._proc_busy = False
 
     def _taskbar_dock_target(self) -> Optional[Tuple[int, int]]:
         """Ideal docked position for the card inside the current taskbar.
@@ -3672,8 +3752,11 @@ class SpeedWidget:
         info = self._net_info
         wifi_val = info.get("wifi", "--")
         net_line = f"wifi signal: {wifi_val}" if wifi_val != "--" else ""
-        # Top-3 processes by sampled download bandwidth.
-        proc_rows = sorted(self._proc_speed.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
+        # Top-3 processes by sampled download bandwidth (lock-protected
+        # snapshot — the map is written by the worker thread).
+        with self._proc_lock:
+            proc_items = list(self._proc_speed.items())
+        proc_rows = sorted(proc_items, key=lambda kv: kv[1][0], reverse=True)[:3]
         proc_text = "\n".join(
             f"  {shorten(name,18).ljust(18)} \u2193{format_speed_live(d):>11}  \u2191{format_speed_live(u):>11}"
             for name, (d, u) in proc_rows) or "  --"
@@ -3742,8 +3825,11 @@ class SpeedWidget:
             self.last_down, self.last_up = down, up
             self.totals.add(down_bytes, up_bytes)
             self.totals.note_speed(down, up)
-            # Feed the rolling sparkline history (bytes/s -> keep raw).
-            self._sparkline_push(down_bytes, up_bytes)
+            # Feed the rolling sparkline history with the true rates (bytes/s).
+            # v2.18.1: it used to receive the per-tick byte *deltas*, which
+            # are only numerically equal to the rate while the tick stays
+            # exactly 1.0 s — timer drift skewed the chart.
+            self._sparkline_push(down, up)
             self._refresh_labels(down, up)
             self._update_idle_state(down, up)
         except Exception:
@@ -3763,10 +3849,9 @@ class SpeedWidget:
             self._evaluate_connection()
             # Refresh local/public IP + Wi-Fi signal lazily (~30s).
             self._refresh_net_info()
-            # Per-process speed sampling (~every tick is fine; it is cheap
-            # because we only iterate the connection-holder names).
-            if now - getattr(self, "_proc_speed_last", 0.0) >= 1.0:
-                self._sample_proc_speed()
+            # Per-process speed sampling — off the UI thread since v2.18.1
+            # (the full-table IO scan used to freeze the card every second).
+            self._maybe_sample_proc_speed()
             # React to the Windows High Contrast accessibility theme being
             # toggled while the app runs; the card repaints with system colors.
             hc = is_high_contrast()
@@ -3914,11 +3999,17 @@ def claim_single_instance() -> bool:
     if not IS_WINDOWS:
         return True
     try:
-        kernel32 = ctypes.windll.kernel32
+        # v2.18.1: plain ``windll.kernel32.GetLastError()`` can return a stale
+        # value — intervening ctypes calls may clobber the thread's last
+        # error between the API call and the read. ``use_last_error=True`` +
+        # ``ctypes.get_last_error()`` is the documented-safe pattern.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
         _instance_mutex = kernel32.CreateMutexW(None, 1, f"Local\\{APP_NAME}_singleton")
-        return kernel32.GetLastError() != ERROR_ALREADY_EXISTS
+        if not _instance_mutex:
+            return True  # could not create the mutex — fail open
+        return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
     except Exception:
         return True
 

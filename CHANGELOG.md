@@ -4,6 +4,70 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.1] - 2026-10-17
+
+The "Smooth Sample" maintenance release — a code review pass that fixes real
+defects in performance, thread-safety, rendering and packaging. No new
+features; every existing behaviour is preserved.
+
+### Fixed
+- **UI froze for a moment every second** — `_sample_proc_speed()` walked the
+  entire process table (`psutil.process_iter()` with `io_counters`) *on the Tk
+  main thread* once per second; on a busy Windows box that is tens to
+  hundreds of milliseconds during which the card, the drag and every popup
+  were frozen. The in-code comment even claimed it "only iterates the
+  connection-holder names" — it iterated every process. The scan now runs on
+  a daemon worker thread; the UI thread only ever reads lock-protected
+  snapshots (`proc_rows()` / the tooltip's top-3 list). The follow-up
+  "drop exited processes" scan moved off the UI thread with it.
+- **Update dialog could crash at shutdown** — the download worker called
+  `window.after(0, …)` directly from its own thread; tkinter is not
+  thread-safe and the codebase already had `_safe_after()` for exactly this
+  hop. The worker now routes through it (and re-checks `_closing`).
+- **Readings could overlap the ↓/↑ arrow icons** — the card reserved the
+  width of a `"999 MB/s"` sample (7 chars), but `format_speed()` produces up
+  to 9 characters (`"1023 KB/s"`, `"99.9 GB/s"`), so those speeds drew past
+  the reserved field into the icon column. The reserved sample is now
+  `"99.9 GB/s"`, the widest string the formatter can emit.
+- **Sparkline was fed per-tick byte deltas, not rates** —
+  `_sparkline_push(down_bytes, up_bytes)` is only numerically equal to
+  bytes/s while the tick stays exactly 1.0 s; `after()` timer drift silently
+  skewed the chart. It now receives the true rates.
+- **`format_bytes` overflow at 1 PiB** — the unit ladder stopped at TB, so a
+  full PiB printed `"1024.00 PB"`. PB now participates in the ladder
+  (`"1.00 PB"`); the pinned test that documented the old behaviour was
+  updated accordingly.
+- **Single-instance check read a possibly-stale error code** —
+  `windll.kernel32.GetLastError()` after another ctypes call can return a
+  clobbered value; the mutex probe now uses `WinDLL(..., use_last_error=True)`
+  + `ctypes.get_last_error()` (the documented-safe pattern) and fails open
+  if the mutex could not be created.
+- **Updater broke for non-ASCII Windows usernames** — the swap `.bat` was
+  written as UTF-8 while `cmd.exe` parses batch files in the ANSI/OEM
+  codepage, so a Persian (or any non-ASCII) `%APPDATA%`/`%TEMP%` path garbled
+  every path in the script and the update silently failed. The updater now
+  prefers 8.3 short paths (pure ASCII) via `GetShortPathNameW`, falling back
+  to writing the script in the ANSI codepage.
+- **Dashboard said "no active connections" while connections existed** —
+  when the connection scan found holders but no app showed sampled I/O
+  deltas in the last second, the empty-state line was simply wrong. It now
+  says "no sampled traffic in the last second".
+
+### Changed
+- **Per-app session totals are bounded** (`PROC_TOTAL_LIMIT = 512`) — a
+  days-long session churning through many apps used to grow the totals map
+  without limit; the busiest entries are kept when the cap is hit.
+- **Emoji label dropped from the right-click panel** — Tk renders colour
+  emoji as monochrome (or tofu) on many Windows font stacks; the
+  "App Network Usage" row is plain text now.
+- **`requirements.txt` contains only the runtime dependency** (`psutil`);
+  the dev-only extras (Pillow for the icon, pytest) moved to
+  `requirements-dev.txt` so end users do not install them by accident.
+- **`net_speed/__init__.py` matches reality** — its `__all__`/docstring
+  advertised six submodules (`constants`, `win32`, `config`, `monitors`,
+  `updates`) that do not exist in this tree; it now truthfully exports only
+  `utils`. The README project-structure section was corrected the same way.
+
 ## [2.17.0] - 2026-10-16
 
 The "Steady Glass" release — three direct user requests: the locked card no

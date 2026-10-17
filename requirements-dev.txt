@@ -1,0 +1,8 @@
+# Development-only extras — NOT needed to run the widget.
+# Install with:  py -m pip install -r requirements-dev.txt
+
+# Icon regeneration (run: python make_icon.py)
+Pillow>=10.0
+
+# Test suite (run: pytest tests/)
+pytest>=7.0
