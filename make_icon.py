@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 SIZE = 256
 BG_GREEN = "#16A34A"

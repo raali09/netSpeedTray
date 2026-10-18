@@ -42,27 +42,30 @@ To run without a console window during development, use `pythonw src/netspeedtra
 
 ```
 src/
-├── netspeedtray.py        # entry point + all UI classes:
-│                          #   NetSpeedTray (main card), Tooltip, UpdateDialog,
-│                          #   per-process dashboard, transparency slider popup
-└── net_speed/             # backend package — pure Python, no UI, unit-testable
-    ├── constants.py       # Win32 magic numbers as named constants, colours, defaults
-    ├── win32.py           # raw ctypes calls: taskbar z-order, signal strength,
-    │                      #   high-contrast detection, logoff/shutdown hooks
-    ├── utils.py           # unit formatting, version parsing (incl. pre-release tags),
-    │                      #   DPI helpers, font fallback
-    ├── config.py          # JSON config load / save with batch writes + migration
-    ├── monitors.py        # speed / CPU / RAM / per-process / IP / Wi-Fi / ping sampling
-    └── updates.py         # GitHub release check + auto-swap installer
+├── netspeedtray.py        # the whole app: UI classes (NetSpeedTray card,
+│                          #   Tooltip, ModernContextPanel, UpdateDialog,
+│                          #   per-process dashboard, opacity popup), the
+│                          #   monitors, config persistence, Win32 glue and
+│                          #   the update checker — a deliberate monolith;
+│                          #   see the note below
+└── net_speed/             # helper package — pure logic, no UI, unit-testable
+    ├── __init__.py        #   re-exports utils
+    └── utils.py           # unit formatting, adapter listing, version parsing
+                           #   (a v2.7.0 six-module split was consolidated
+                           #   back into the entry file in later releases)
 tests/                     # pytest suite
 assets/                    # icon.png, icon.ico
 make_icon.py               # regenerates the icon
 build_exe.bat              # one-shot PyInstaller build
 .github/                   # workflows, issue templates, PR template
+                           #   (GitHub repository only — not in the source ZIP)
 ```
 
-When adding a new feature, prefer putting reusable logic in `src/net_speed/` (so it can
-be unit-tested) and only the UI glue in `src/netspeedtray.py`.
+When adding a new feature, prefer putting reusable, UI-free logic in
+`src/net_speed/` (so it can be unit-tested) and only the UI glue in
+`src/netspeedtray.py`. Note that `netspeedtray.py` is intentionally a single
+large module today — if you factor something out of it, do it one helper at
+a time with its test, not a grand split.
 
 ## Code style
 
@@ -90,7 +93,7 @@ The `tests/` directory is a plain `pytest` suite. Run it from the repo root:
 
 ```bash
 pytest tests/                  # full suite
-pytest tests/test_utils.py -v  # one file
+pytest tests/test_format.py -v # one file
 pytest -k "version"            # by name pattern
 ```
 

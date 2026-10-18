@@ -70,7 +70,11 @@ def _read_version() -> str:
                 return ver
         except OSError:
             continue
-    return "2.7.0"
+    # v2.18.2: the hard-coded fallback used to say "2.7.0" — a version from
+    # mid-2024. If the VERSION file ever went missing, the running app and the
+    # updater would both report (and compare against) a half-year-old release.
+    # The fallback now tracks the last shipped version instead.
+    return "2.18.2"
 
 
 APP_VERSION = _read_version()
@@ -116,6 +120,13 @@ FG_ALERT = "#F27585"
 FG_LOCK_FLASH = "#F0B45A"
 FG_DIM = "#AAB5C1"
 FG_CHECK = "#55C7F3"
+# v2.18.2: these two palette entries previously existed only inside the
+# THEMES dicts and reached module scope through apply_theme()'s globals()
+# injection — static checkers (pyflakes) flagged every use site as an
+# undefined name. Declared here like the rest of the palette; apply_theme()
+# still rebinds them per theme.
+BG_HOVER = "#243343"
+SHADOW_COLOR = "#071019"
 
 # --- Glass card surface (v2.17.0) --------------------------------------------
 # The card is painted as a vertical 3-stop gradient (sheen -> top -> bottom)
@@ -283,11 +294,14 @@ CONTENT_PAD_X = 2
 CONTENT_PAD_Y = 0
 ICON_GAP = 1
 SEP_PAD = 1
-# v2.18.1: the widest string format_speed() can produce is "99.9 GB/s"
-# (9 chars). The old "999 MB/s" sample (7 chars) let 1000–1023 KB/s and
-# 10–99.9 GB/s readings grow past the reserved field and overlap the
-# ↓/↑ arrow icons. Reserve the real maximum.
-VALUE_SAMPLE = "99.9 GB/s"
+# v2.18.2: reserve the widest of the formatter's near-maximal outputs.
+# "99.9 GB/s" and "1023 KB/s" are both 9 characters, but in proportional
+# fonts (Segoe UI) the all-digit "1023 KB/s" renders a couple of pixels
+# wider than "99.9 GB/s" — the decimal point is narrower than a digit.
+# Both candidates are measured and the widest wins, so 1000–1023 KB/s
+# readings can never grow past the reserved field into the ↓/↑ icons
+# (the v2.18.1 single-sample fix left that case marginal by 2–3 px).
+VALUE_SAMPLES = ("99.9 GB/s", "1023 KB/s")
 # Padding that used to come free from tk.Label defaults; explicit now that
 # text is measured with font metrics, so the card keeps its old proportions.
 GLYPH_PAD_X = 4
@@ -718,8 +732,8 @@ class Config:
 # existing ``netspeedtray.format_speed`` style access keeps working.
 from net_speed.utils import (
     list_adapters, adapter_status_map,
-    format_speed, format_speed_live, format_bytes, format_bytes_compact, format_duration, shorten,
-    compare_versions, _maybe_int,
+    format_speed, format_speed_live, format_bytes, format_duration, shorten,
+    compare_versions,
 )
 
 class SpeedMonitor:
@@ -1878,6 +1892,14 @@ class ModernContextPanel:
                   lambda: (w.compact_var.set(not w.compact_var.get()), w._on_toggle_compact()))
         self._row(inner, "Theme", w.theme_key.capitalize(),
                   lambda: w.theme_menu.post(x, y))
+        # v2.18.2: "Corner style", "Set ping target" and "Alert threshold"
+        # existed only on the classic tk.Menu, which is never posted (the
+        # right-click path opens ModernContextPanel exclusively) — three
+        # documented settings were unreachable from the UI. They are now
+        # rows here, alongside Theme / Font size / Network adapter which
+        # already exposed their submenus the same way.
+        self._row(inner, "Corner style", w.corner_radius_key.capitalize(),
+                  lambda: w.corner_menu.post(x, y))
         self._row(inner, "Auto-hide when idle", "ON" if w.autohide_var.get() else "OFF",
                   lambda: (w.autohide_var.set(not w.autohide_var.get()), w._on_toggle_autohide()))
         self._row(inner, "Start with Windows", "ON" if is_autostart_enabled() else "OFF",
@@ -1889,6 +1911,17 @@ class ModernContextPanel:
         self._row(inner, "Network adapter", shorten(w.adapter if w.adapter != ALL_ADAPTERS else "All adapters", 18),
                   lambda: w.adapter_menu.post(x, y))
         self._row(inner, "Transparency", f"{int(w.opacity * 100)}%", w._open_opacity_popup)
+        # v2.18.2: the two remaining classic-menu-only settings, surfaced here.
+        ping_host = str(w.config.get("ping_host", ""))
+        if ping_host:
+            ping_value = shorten(f"{ping_host}:{w.config.get('ping_port', 53)}", 18)
+        else:
+            ping_value = "Default (DNS)"
+        self._row(inner, "Set ping target", ping_value, w._set_ping_target)
+        alert_mbps = float(w.config.get("alert_mbps", 0.0))
+        self._row(inner, "Alert threshold",
+                  "Off" if alert_mbps == 0 else f"above {alert_mbps:g} MB/s",
+                  lambda: w.alert_menu.post(x, y))
 
         sep = tk.Frame(inner, height=1, bg=BORDER_SOFT)
         sep.pack(fill="x", padx=6, pady=5)
@@ -2508,7 +2541,10 @@ class SpeedWidget:
         pad_x = int(round(GLYPH_PAD_X * self.ui_scale))
         pad_y = int(round(GLYPH_PAD_Y * self.ui_scale))
         self.icon_px = self._text_size("\u2193", self.font_icon)[0] + pad_x
-        self._value_px_max = self._text_size(VALUE_SAMPLE, self.font_value)[0] + pad_x
+        # v2.18.2: measure every near-maximal sample and reserve the widest
+        # (proportional fonts: all-digit strings are wider than the dotted one).
+        self._value_px_max = max(self._text_size(sample, self.font_value)[0]
+                                 for sample in VALUE_SAMPLES) + pad_x
         self.badge_px = max(self._text_size("CPU 100%", self.font_system)[0],
                             self._text_size("RAM 100%", self.font_system)[0]) + pad_x
         self.row_h = max(self._text_size("0 KB/s", self.font_value)[1],

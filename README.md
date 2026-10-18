@@ -11,6 +11,28 @@ once per second. The transparency slider fades the **card background only** — 
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
 
+## What's new in 2.18.2
+
+The **"Full Panel"** follow-up to the 2.18.1 code review — every finding from a
+second, whole-project audit is fixed:
+
+- **Corner style, Set ping target and Alert threshold are back in the menu** —
+  all three settings were defined on a legacy menu that is never shown, so
+  they (although documented right here) were unreachable from the UI. They
+  are rows in the right-click panel again, alongside Theme / Font size /
+  Network adapter.
+- **No more marginal speed-field width** — the card reserves the widest of
+  *all* near-maximal readings (not a single sample), so `1023 KB/s` can
+  never nudge the ↓/↑ icons in proportional fonts either.
+- **Version fallbacks un-staled** — the emergency fallback in the app, the
+  PyInstaller spec and the build script no longer claim 2024's `2.7.0`.
+- **Docs now tell the truth** — Controls table (double-click toggles compact
+  mode; `Esc` hides the tooltip), real test coverage, the real `net_speed`
+  layout in CONTRIBUTING, and `.github/` marked as repo-only.
+- **Static-analysis cleanups** — dead imports removed and the two
+  theme-injected color globals (`BG_HOVER`, `SHADOW_COLOR`) declared at
+  module level, so pyflakes no longer flags them.
+
 ## What's new in 2.18.1
 
 The **"Smooth Sample"** maintenance release — a code-review pass fixing real
@@ -136,10 +158,12 @@ setups, and accessibility:
 - **Better multi-monitor / DPI handling** — the card survives a primary-display swap, a
   DPI change, and being dragged between monitors without jumping or hiding behind the
   secondary taskbar.
-- **Modular source** — the monolithic file has been split into a small `src/net_speed/`
-  package (`constants`, `win32`, `utils`, `config`, `monitors`, `updates`) with
-  `src/netspeedtray.py` as the thin entry point. There is now a `pytest` suite under
-  `tests/`.
+- **Modular source** — a `src/net_speed/` package was carved out of the monolith
+  (`constants`, `win32`, `utils`, `config`, `monitors`, `updates`) with
+  `src/netspeedtray.py` as the entry point, plus a `pytest` suite under
+  `tests/`. (Most of those modules were later folded back into the entry
+  file; today the package holds `utils` only — see
+  [Project structure](#project-structure).)
 
 See [CHANGELOG.md](CHANGELOG.md) for the full diff, and [CONTRIBUTING.md](CONTRIBUTING.md)
 if you would like to hack on it.
@@ -212,8 +236,9 @@ pythonw src/netspeedtray.py
 | Action | Result |
 | --- | --- |
 | Left-click + drag | Move the card (snaps to screen edges) |
-| Right-click | Open the menu (transparency, adapter, toggles, updates) |
-| Double-click / `Esc` | Quit |
+| Right-click | Open the menu (transparency, adapter, corner style, alert threshold, ping target, toggles, updates) |
+| Double-click | Toggle compact taskbar mode |
+| `Esc` | Hide the tooltip (quit lives in the right-click menu) |
 | Hover | Tooltip with totals and top connections |
 
 ### Background transparency slider
@@ -305,7 +330,8 @@ py -m PyInstaller --noconfirm --clean --onefile --windowed ^
     src/netspeedtray.py
 ```
 
-A ready-made GitHub Actions workflow (`.github/workflows/release.yml`) builds the exe on
+A ready-made GitHub Actions workflow (`.github/workflows/release.yml` — in the
+GitHub repository; the folder is not part of the source ZIP) builds the exe on
 Windows automatically whenever you push a `v*` tag, and attaches it to a draft release.
 
 ## Configuration
@@ -350,7 +376,7 @@ NetSpeedTray/
 ├── screenshots/
 │   └── main.png
 ├── build_exe.bat              # optional: build dist\NetSpeedTray.exe
-├── .github/
+├── .github/                   # GitHub repository only (not in the source ZIP):
 │   ├── workflows/
 │   │   └── release.yml        # build + attach exe on tag push
 │   ├── ISSUE_TEMPLATE/        # bug_report / feature_request forms
@@ -370,9 +396,10 @@ py -m pip install -r requirements-dev.txt
 pytest tests/                  # from the repo root
 ```
 
-The suite covers version parsing, config migration, unit formatting, the per-process
-speed sampler and the sparkline ring buffer — i.e. everything that does not need a real
-Windows desktop. Windows-only Win32 helpers are skipped on non-Windows runners.
+The suite covers version parsing, config migration, unit formatting, and the
+speed monitor's delta sampling plus the daily-totals tracker — i.e. the pure
+logic that does not need a real Windows desktop. Windows-only Win32 helpers
+are skipped on non-Windows runners.
 
 The ready-made `NetSpeedTray.exe` is attached to the [latest release](https://github.com/raali09/NetSpeedTray/releases/latest).
 

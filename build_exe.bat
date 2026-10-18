@@ -13,7 +13,8 @@ set "ICON=assets\icon.ico"
 set "PNG=assets\icon.png"
 set "VERSION_FILE=VERSION"
 set "SPEC_FILE=netspeedtray.spec"
-set "VERSION=2.7.0"
+rem v2.18.2: fallback was a stale 2.7.0; now tracks the last shipped version.
+set "VERSION=2.18.2"
 
 if not exist "%SCRIPT%" (
     echo ERROR: %SCRIPT% was not found. Run this file from the project root.
@@ -22,11 +23,11 @@ if not exist "%SCRIPT%" (
 )
 
 rem --- Read version from VERSION file (single line, robust to CRLF) ---------
-set "VERSION=2.7.0"
+set "VERSION=2.18.2"
 if exist "%VERSION_FILE%" (
     for /f "usebackq delims=" %%a in ("%VERSION_FILE%") do set "VERSION=%%a"
 )
-if "!VERSION!"=="" set "VERSION=2.7.0"
+if "!VERSION!"=="" set "VERSION=2.18.2"
 
 echo Building %APPNAME% v%VERSION%
 echo.

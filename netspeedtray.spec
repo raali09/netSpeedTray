@@ -28,7 +28,7 @@ ICON_ICO = os.path.join(PROJECT_ROOT, 'assets', 'icon.ico')
 ICON_PNG = os.path.join(PROJECT_ROOT, 'assets', 'icon.png')
 VERSION_PATH = os.path.join(PROJECT_ROOT, 'VERSION')
 
-FALLBACK_VERSION = '2.7.0'
+FALLBACK_VERSION = '2.18.2'
 
 
 def _read_version():
@@ -111,7 +111,8 @@ if os.path.exists(ICON_PNG):
     datas.append((ICON_PNG, '.'))
 if os.path.exists(VERSION_PATH):
     # The frozen app reads VERSION at runtime for update comparisons.
-    # Without bundling it, _read_version() falls back to 2.7.0 forever.
+    # Without bundling it, _read_version() falls back to the built-in
+    # fallback version forever (it used to be a half-year-old '2.7.0').
     datas.append((VERSION_PATH, '.'))
 
 # psutil ships some data files on Windows; collect them to be safe.
@@ -162,6 +163,7 @@ exe = EXE(
     entitlements_file=None,
     icon=ICON_ICO if os.path.exists(ICON_ICO) else None,
     # version_file is the path to the generated version-info text. The literal
-    # '2.7.0' below is the fallback used if version_file could not be created.
-    version=version_file if version_file else '2.7.0',
+    # '2.18.2' below is the fallback used if version_file could not be created
+    # (kept in sync with FALLBACK_VERSION above; was a stale '2.7.0' before).
+    version=version_file if version_file else '2.18.2',
 )

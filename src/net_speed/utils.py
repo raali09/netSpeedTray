@@ -1,12 +1,12 @@
-"""Pure, dependency-free helper functions.
+"""Pure helper functions with a single third-party dependency.
 
-Nothing in this module imports :mod:`tkinter`, :mod:`ctypes`, or :mod:`psutil`,
-so it is safe to unit-test on any platform and cheap to import. The network
-adapter helpers do import :mod:`psutil` lazily inside the function body.
+Nothing in this module imports :mod:`tkinter` or :mod:`ctypes`, so it is
+safe to unit-test on any platform that can install :mod:`psutil` (the two
+adapter helpers need it at import time — v2.18.2: the docstring used to
+deny this and claim a lazy import that never existed).
 """
 from __future__ import annotations
 
-from datetime import date
 from typing import List, Optional, Tuple
 
 import psutil

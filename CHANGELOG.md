@@ -4,6 +4,70 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.2] - 2026-10-18
+
+The "Full Panel" follow-up to the 2.18.1 code review — every finding from the
+second, whole-project audit is fixed. One user-visible restoration (three
+documented settings were unreachable) plus static-analysis and
+documentation-vs-reality corrections. No behaviour changes beyond the
+restored menu rows.
+
+### Fixed
+- **Three documented settings were unreachable from the UI** — "Corner
+  style", "Set ping target…" and "Alert threshold" were defined on the
+  classic `tk.Menu` widget, but the right-click path posts only the modern
+  `ModernContextPanel`; the classic menu is never shown. README documented
+  all three as features, the config keys persisted, yet no user could
+  reach them. All three are now rows in the modern panel (Corner style and
+  Alert threshold post their existing submenus next to Theme / Font size /
+  Network adapter; Set ping target opens the existing prompt), so what the
+  README promises is what the app delivers.
+- **Reserved speed-field width was marginal in proportional fonts** — the
+  v2.18.1 fix reserved the width of a single sample (`"99.9 GB/s"`). In
+  proportional fonts (Segoe UI) the all-digit `"1023 KB/s"` renders a
+  couple of pixels wider than the dotted sample, because the decimal point
+  is narrower than a digit, leaving the 1000–1023 KB/s case marginal by
+  2–3 px. The card now measures *every* near-maximal sample
+  (`VALUE_SAMPLES`) and reserves the widest.
+- **Stale version fallback** — the hard-coded fallbacks in
+  `_read_version()` (`src/netspeedtray.py`), `netspeedtray.spec` and
+  `build_exe.bat` all said `2.7.0`, a half-year-old release; a frozen
+  build whose VERSION file went missing would report (and the updater
+  would compare against) that ancient version. All fallbacks now track
+  the shipped version.
+
+### Changed
+- **Dead imports removed** — `format_bytes_compact` and `_maybe_int` were
+  imported into `netspeedtray.py` but never used there (they remain public
+  helpers of `net_speed.utils`); `datetime.date` was imported and unused
+  in `utils.py`; `PIL.ImageFilter` was imported and unused in
+  `make_icon.py`.
+- **`BG_HOVER` / `SHADOW_COLOR` are declared at module level** — the two
+  palette entries previously existed only inside the `THEMES` dicts and
+  reached module scope through `apply_theme()`'s `globals()` injection,
+  so static checkers (pyflakes) flagged every use site as an undefined
+  name. They are now declared like the rest of the palette; the theme
+  switcher still rebinds them.
+- **Documentation matches reality** —
+  - README *Controls* table: `Esc` no longer quits (it hides the tooltip)
+    and double-click toggles compact mode rather than quitting; the
+    right-click row now lists the restored settings.
+  - README *Tests* section: the suite covers version parsing, config
+    migration, unit formatting and the speed monitor's delta sampling +
+    daily-totals tracker — it never covered the per-process sampler or
+    the sparkline ring buffer as previously claimed.
+  - README 2.7.0 release notes: the six-module `net_speed` split was
+    later consolidated; the note now says so and points at the real
+    structure.
+  - README / CONTRIBUTING `.github/` references are marked as
+    GitHub-repository-only (the folder is not part of the source ZIP).
+  - CONTRIBUTING project structure: now shows the actual single-module
+    `net_speed` package (the old tree listed five modules that do not
+    exist) and the example test file name is real.
+  - `net_speed/utils.py` module docstring no longer claims to be
+    "dependency-free" with a "lazy psutil import" — `psutil` is a
+    module-level import (the only third-party one).
+
 ## [2.18.1] - 2026-10-17
 
 The "Smooth Sample" maintenance release — a code review pass that fixes real
