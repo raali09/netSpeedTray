@@ -28,7 +28,7 @@ ICON_ICO = os.path.join(PROJECT_ROOT, 'assets', 'icon.ico')
 ICON_PNG = os.path.join(PROJECT_ROOT, 'assets', 'icon.png')
 VERSION_PATH = os.path.join(PROJECT_ROOT, 'VERSION')
 
-FALLBACK_VERSION = '2.18.2'
+FALLBACK_VERSION = '2.18.3'
 
 
 def _read_version():
@@ -163,7 +163,7 @@ exe = EXE(
     entitlements_file=None,
     icon=ICON_ICO if os.path.exists(ICON_ICO) else None,
     # version_file is the path to the generated version-info text. The literal
-    # '2.18.2' below is the fallback used if version_file could not be created
+    # '2.18.3' below is the fallback used if version_file could not be created
     # (kept in sync with FALLBACK_VERSION above; was a stale '2.7.0' before).
-    version=version_file if version_file else '2.18.2',
+    version=version_file if version_file else '2.18.3',
 )

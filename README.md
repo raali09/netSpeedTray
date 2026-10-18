@@ -1,5 +1,7 @@
 # NetSpeedTray
 
+[![CI](https://github.com/raali09/NetSpeedTray/actions/workflows/ci.yml/badge.svg)](https://github.com/raali09/NetSpeedTray/actions/workflows/ci.yml)
+
 A tiny always-on-top network monitor for Windows 10/11 that shows live download and
 upload speed — plus optional CPU and RAM load — in a translucent, rounded glass card
 that sits in the corner of your screen.
@@ -10,6 +12,26 @@ No installer, no background service: it is a single Python file that samples `ps
 once per second. The transparency slider fades the **card background only** — the speed
 readings always stay crisp and fully readable, even at maximum transparency, thanks to a
 dark text outline drawn behind every reading.
+
+## What's new in 2.18.3
+
+The **"Release Pipeline"** maintenance release — no application changes, but
+pushing to GitHub neither built the `.exe` nor created a Release, because the
+`.github/workflows/` folder was missing from the repository. The automation is
+restored:
+
+- **Pushing a `v*` tag now builds and publishes** — [release.yml](.github/workflows/release.yml)
+  runs on a Windows runner: tag/`VERSION` match check, test suite, PyInstaller
+  build of `NetSpeedTray.exe`, SHA-256 checksum, release notes extracted from
+  this file's changelog, and a **draft** GitHub Release with the `.exe` +
+  `SHA256SUMS.txt` attached. Review the draft, press *Publish*, done.
+- **CI on every push and pull request** — [ci.yml](.github/workflows/ci.yml)
+  runs pyflakes + the pytest suite on a Windows runner (so the Windows-only
+  tests execute too).
+- **Tag/`VERSION` mismatch fails fast** — the workflow refuses to build when
+  the pushed tag does not match the `VERSION` file, with a copy-paste fix-it
+  hint, closing the stale-update hole warned about below.
+- See [Releasing](#releasing) for the exact commands.
 
 ## What's new in 2.18.2
 
@@ -28,7 +50,8 @@ second, whole-project audit is fixed:
   PyInstaller spec and the build script no longer claim 2024's `2.7.0`.
 - **Docs now tell the truth** — Controls table (double-click toggles compact
   mode; `Esc` hides the tooltip), real test coverage, the real `net_speed`
-  layout in CONTRIBUTING, and `.github/` marked as repo-only.
+  layout in CONTRIBUTING, and `.github/` marked as repo-only (the folder
+  is shipped in the source ZIP again as of 2.18.3).
 - **Static-analysis cleanups** — dead imports removed and the two
   theme-injected color globals (`BG_HOVER`, `SHADOW_COLOR`) declared at
   module level, so pyflakes no longer flags them.
@@ -284,12 +307,17 @@ Update checks can be turned off by setting `check_updates_on_start` to `false` i
 
 ### Publishing a release on GitHub
 
-The release tag, `VERSION`, and the executable must contain the same version. Before
-publishing, change `VERSION` (for example, `2.7.1`), run the build script, and verify
-the packaged app with `NetSpeedTray.exe --version`. Then create a GitHub Release with
-the matching tag `v2.7.1` and upload `dist\NetSpeedTray.exe` as a release asset. Do not
-reuse an old executable or publish a release whose tag is newer than the version inside
-the executable, or every installed copy will keep offering the same update.
+Releases are built automatically by [GitHub Actions](.github/workflows/release.yml) —
+no local build is needed. Pushing a `v*` tag runs the whole pipeline on a Windows
+runner (tag/`VERSION` check, tests, PyInstaller build, checksum) and creates a **draft**
+release with `NetSpeedTray.exe` + `SHA256SUMS.txt` attached; the changelog section for
+that version becomes the release notes. Review the draft on the
+[Releases page](https://github.com/raali09/NetSpeedTray/releases) and press *Publish*.
+
+The release tag and the `VERSION` file must contain the same version — the workflow
+checks this and fails fast with a fix-it hint if they differ. Do not publish a release
+whose tag is newer than the version inside the executable, or every installed copy
+will keep offering the same update. See [Releasing](#releasing) for the commands.
 
 ## App icon
 
@@ -330,9 +358,9 @@ py -m PyInstaller --noconfirm --clean --onefile --windowed ^
     src/netspeedtray.py
 ```
 
-A ready-made GitHub Actions workflow (`.github/workflows/release.yml` — in the
-GitHub repository; the folder is not part of the source ZIP) builds the exe on
+A ready-made GitHub Actions workflow (`.github/workflows/release.yml`) builds the exe on
 Windows automatically whenever you push a `v*` tag, and attaches it to a draft release.
+`ci.yml` runs the test suite on every push — see [Releasing](#releasing).
 
 ## Configuration
 
@@ -376,9 +404,10 @@ NetSpeedTray/
 ├── screenshots/
 │   └── main.png
 ├── build_exe.bat              # optional: build dist\NetSpeedTray.exe
-├── .github/                   # GitHub repository only (not in the source ZIP):
+├── .github/                   # CI + release automation (shipped since 2.18.3):
 │   ├── workflows/
-│   │   └── release.yml        # build + attach exe on tag push
+│   │   ├── ci.yml             # pyflakes + pytest on every push / PR
+│   │   └── release.yml        # build + attach exe to a draft release on v* tag push
 │   ├── ISSUE_TEMPLATE/        # bug_report / feature_request forms
 │   └── PULL_REQUEST_TEMPLATE.md
 └── .gitignore
@@ -405,23 +434,43 @@ The ready-made `NetSpeedTray.exe` is attached to the [latest release](https://gi
 
 ## Releasing
 
-The repository stays source-only; the executable is attached to the GitHub release.
+The repository stays source-only; the executable is built **on GitHub** and attached
+to the release by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+A normal `git push` only runs CI — a release happens only when you push a tag.
+
+To ship version `2.18.3` (the example below generalises to any version):
 
 ```bash
-build_exe.bat
+# 1. Make sure VERSION contains 2.18.3 and CHANGELOG.md has a [2.18.3] section,
+#    then commit and push as usual (this triggers CI only).
 git add -A
-git commit -m "NetSpeedTray 1.1.0"
-git tag -a v1.1.0 -m "NetSpeedTray 1.1.0"
-git push origin main --tags
+git commit -m "Release 2.18.3"
+git push
+
+# 2. Tag and push the tag — THIS is what triggers the release build.
+git tag v2.18.3
+git push origin v2.18.3
 ```
 
-If you push the tag from a clone where the `release.yml` workflow is present, GitHub
-Actions builds the exe on a Windows runner and attaches it to a draft release for you
-to review and publish. With the [GitHub CLI](https://cli.github.com/) you can also do
-it locally:
+What the workflow does, in order: pyflakes → tag/`VERSION` match check (fails fast
+with a fix-it hint on mismatch) → pytest → PyInstaller build of `NetSpeedTray.exe`
+→ SHA-256 checksum → draft release with notes extracted from the `[2.18.3]` changelog
+section → assets `NetSpeedTray.exe` + `SHA256SUMS.txt` attached. Re-running the
+workflow for the same tag re-uploads fresh assets instead of failing.
+
+The release is created as a **draft** on purpose: the in-app updater only sees
+*published* releases, so a human always reviews before users are offered the update.
+Open the [Releases page](https://github.com/raali09/NetSpeedTray/releases), check the
+draft, then press *Publish release*.
+
+If the release step fails with a permission error, check
+*Settings → Actions → General → Workflow permissions* — the workflow grants itself
+`contents: write`, but an organisation policy can still override it. Building locally
+instead is always possible: `build_exe.bat`, then upload `dist/NetSpeedTray.exe` to a
+release by hand or with the [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh release create v1.1.0 dist/NetSpeedTray.exe --title "NetSpeedTray 1.1.0" --notes-file CHANGELOG.md
+gh release create v2.18.3 dist/NetSpeedTray.exe --title "NetSpeedTray 2.18.3" --notes-file CHANGELOG.md
 ```
 
 ## Troubleshooting

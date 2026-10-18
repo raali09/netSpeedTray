@@ -1,0 +1,45 @@
+# Continuous integration for NetSpeedTray.
+#
+# On every push to main/master and every pull request, runs on a Windows
+# runner (the platform the widget actually targets):
+#   - pyflakes static check over the application sources
+#   - the full pytest suite (Windows-only tests are included here —
+#     they are lenient shape checks, so they pass on a headless runner)
+#
+# Building the .exe and publishing releases is handled separately by
+# release.yml, which is triggered by pushing a v* tag.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Static check + tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt pyflakes
+
+      - name: Static check (pyflakes)
+        run: python -m pyflakes src/netspeedtray.py src/net_speed/utils.py make_icon.py
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q

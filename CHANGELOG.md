@@ -4,6 +4,51 @@ All notable changes to NetSpeedTray are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.3] - 2026-10-18
+
+The "Release Pipeline" maintenance release — no application changes, but
+the repository could not produce a release: pushing to GitHub neither built
+the `.exe` nor created a Release, because the `.github/workflows/` folder
+(removed from the source distribution) was missing from the repo. The
+automation is restored and the docs now describe the real flow.
+
+### Fixed
+- **Release automation was missing entirely** — with no
+  `.github/workflows/` in the repo, no CI ran and pushing a `v*` tag did
+  nothing (README still promised it would). Two workflows are back:
+  - `release.yml` — triggered by pushing a `v*` tag; runs on a Windows
+    runner, checks the tag against `VERSION`, runs the test suite, builds
+    `NetSpeedTray.exe` with PyInstaller, computes its SHA-256, extracts
+    this version's section from `CHANGELOG.md` into the release notes and
+    attaches the `.exe` + `SHA256SUMS.txt` to a **draft** GitHub Release
+    (draft on purpose: the in-app updater only sees published releases).
+    Re-running the workflow for the same tag re-uploads the assets with
+    `--clobber` instead of failing.
+  - `ci.yml` — pyflakes + the pytest suite on every push to main/master
+    and every pull request (Windows runner, where the Windows-only tests
+    also execute).
+- **Tag/VERSION mismatch can no longer silently ship** — the release
+  workflow fails fast with a copy-paste fix-it hint when the pushed tag
+  (e.g. `v2.18.3`) does not match the `VERSION` file, closing the hole
+  the README warns about (an update loop where every installed copy keeps
+  offering the same update).
+- **Version fallbacks track 2.18.3** — `_read_version()` in
+  `src/netspeedtray.py`, `netspeedtray.spec` (`FALLBACK_VERSION` and the
+  `version=` literal) and `build_exe.bat` (three literals) follow the
+  rule introduced in 2.18.2.
+
+### Changed
+- **README "Publishing a release" section describes the automated flow**
+  — the old text explained how to build and upload the `.exe` by hand;
+  the new one documents the tag-push flow (`git tag v2.18.3 && git push
+  origin v2.18.3`), the draft-review step, the tag/VERSION guard and the
+  automatic changelog-derived release notes.
+- **CI status badge** added to the README header, pointing at the new
+  `ci.yml` workflow.
+- **`.github/` is now part of the distribution** — previous notes marked
+  the folder as repository-only; it is now shipped in the source ZIP so
+  a fresh `git init && push` immediately has working CI and releases.
+
 ## [2.18.2] - 2026-10-18
 
 The "Full Panel" follow-up to the 2.18.1 code review — every finding from the

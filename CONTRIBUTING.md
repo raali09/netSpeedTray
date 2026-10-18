@@ -58,7 +58,8 @@ assets/                    # icon.png, icon.ico
 make_icon.py               # regenerates the icon
 build_exe.bat              # one-shot PyInstaller build
 .github/                   # workflows, issue templates, PR template
-                           #   (GitHub repository only — not in the source ZIP)
+                           #   (CI + release automation; shipped in the ZIP
+                           #   since 2.18.3 — a plain `git init` + push works)
 ```
 
 When adding a new feature, prefer putting reusable, UI-free logic in

@@ -1,0 +1,146 @@
+# Release pipeline for NetSpeedTray.
+#
+# Triggered by pushing a version tag:
+#
+#     git tag v2.18.3
+#     git push origin v2.18.3
+#
+# Runs on a Windows runner and, in order:
+#   1. static check (pyflakes)
+#   2. verifies the pushed tag matches the VERSION file (fails fast if not)
+#   3. runs the pytest suite
+#   4. builds the single-file windowed NetSpeedTray.exe with PyInstaller
+#   5. computes its SHA-256 checksum
+#   6. extracts this version's section from CHANGELOG.md into the release notes
+#   7. creates a DRAFT GitHub Release with the .exe + checksum attached
+#
+# The release is created as a draft on purpose: the in-app updater only sees
+# published releases, so a human reviews the draft and presses "Publish".
+# Re-running the workflow for the same tag uploads fresh assets (--clobber)
+# instead of failing because the draft already exists.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Required so the workflow's GITHUB_TOKEN may create the Release.
+# (A workflow-level `permissions:` block overrides the repo default.)
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build NetSpeedTray.exe and create draft release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install --upgrade pyinstaller pyflakes
+
+      - name: Static check (pyflakes)
+        run: python -m pyflakes src/netspeedtray.py src/net_speed/utils.py make_icon.py
+
+      - name: Verify tag matches VERSION
+        shell: bash
+        run: |
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "VERSION file: ${VERSION}"
+          echo "Pushed tag:   ${TAG}"
+          if [ -z "$VERSION" ] || [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Tag v${TAG} does not match VERSION file ('${VERSION}')."
+            echo "::error::Update VERSION (and CHANGELOG.md) first, delete the tag, then re-tag:"
+            echo "::error::  git tag -d v${TAG} && git push origin :refs/tags/v${TAG}"
+            echo "::error::  # bump VERSION, commit, then: git tag v<new> && git push origin v<new>"
+            exit 1
+          fi
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --noconfirm --clean netspeedtray.spec
+
+      - name: Verify the executable was produced
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'dist/NetSpeedTray.exe')) {
+            throw 'dist/NetSpeedTray.exe was not produced by the build.'
+          }
+          $size = (Get-Item 'dist/NetSpeedTray.exe').Length
+          Write-Host "Built NetSpeedTray.exe ($size bytes)."
+
+      - name: Compute SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/NetSpeedTray.exe').Hash
+          "$hash  NetSpeedTray.exe" | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Build release notes from CHANGELOG.md
+        shell: bash
+        run: |
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          {
+            echo "NetSpeedTray v${VERSION} — built automatically by GitHub Actions from tag ${GITHUB_REF_NAME}."
+            echo
+            echo '## Changes'
+            echo
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md
+            echo
+            echo '## Assets'
+            echo
+            echo '- **NetSpeedTray.exe** — single-file, windowed (no console) Windows executable. No installer, no Python needed.'
+            echo '- **SHA256SUMS.txt** — SHA-256 checksum of the executable.'
+            echo
+            echo '## Verify the download (PowerShell)'
+            echo
+            echo '```pwsh'
+            echo 'Get-FileHash -Algorithm SHA256 .\NetSpeedTray.exe'
+            echo '```'
+            echo
+            echo 'Compare the hash with SHA256SUMS.txt, then double-click the exe. Windows may show a SmartScreen prompt for an unsigned binary — *More info > Run anyway*.'
+            echo
+            echo 'Prefer to run from source? See the README (requires Python 3.9+ and `pip install psutil`).'
+          } > release_notes.md
+          # Fail loudly if the changelog section for this version is missing.
+          if ! grep -q '## Changes' release_notes.md || [ "$(wc -l < release_notes.md)" -lt 12 ]; then
+            echo "::warning::Could not extract a [${VERSION}] section from CHANGELOG.md — using minimal notes."
+          fi
+          cat release_notes.md
+
+      - name: Create draft release with the .exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if (gh release view $tag) {
+            Write-Host "Release for $tag already exists (re-run) — uploading fresh assets."
+            gh release upload $tag dist/NetSpeedTray.exe SHA256SUMS.txt --clobber
+          } else {
+            gh release create $tag `
+              --draft `
+              --title "NetSpeedTray $tag" `
+              --notes-file release_notes.md `
+              dist/NetSpeedTray.exe SHA256SUMS.txt
+          }
+          gh release view $tag --json name,isDraft,assets

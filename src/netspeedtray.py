@@ -74,7 +74,7 @@ def _read_version() -> str:
     # mid-2024. If the VERSION file ever went missing, the running app and the
     # updater would both report (and compare against) a half-year-old release.
     # The fallback now tracks the last shipped version instead.
-    return "2.18.2"
+    return "2.18.3"
 
 
 APP_VERSION = _read_version()
